@@ -1,0 +1,13 @@
+# Sprint 0: dependency declarations only. Pin exact versions after environment validation.
+pydantic>=2.8,<3.0
+PyYAML>=6.0,<7.0
+
+# Pipeline implementation (future sprints)
+opencv-python>=4.10,<5.0
+numpy>=1.26,<3.0
+torch>=2.3,<3.0
+ultralytics>=8.3,<9.0
+
+# Interface and demo layers (future sprints)
+streamlit>=1.38,<2.0
+pytest>=8.0,<9.0

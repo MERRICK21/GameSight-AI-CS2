@@ -1,0 +1,1 @@
+"""Temporal event-fusion contracts."""

@@ -1,0 +1,45 @@
+project:
+  name: gamesight-ai-cs2
+  environment: development
+
+paths:
+  raw_videos: data/raw
+  annotations: data/annotations
+  artifacts: artifacts
+  models: models
+
+input:
+  accepted_extensions: [".mp4", ".mov", ".mkv"]
+  preferred_resolution: [1920, 1080]
+  preferred_fps: 60
+  viewpoint: first_person
+
+preprocessing:
+  analysis_fps: 10
+  normalize_aspect_ratio: "16:9"
+  detect_overlays: true
+
+detection:
+  enabled: false
+  model_path: null
+  confidence_threshold: 0.35
+  classes: [enemy, teammate]
+
+tracking:
+  enabled: false
+  backend: bytetrack
+
+hud:
+  enabled: false
+  language_mode: language_agnostic
+  supported_profiles: [standard_cn, standard_en, unknown]
+
+events:
+  enabled: false
+  min_event_confidence: 0.50
+
+reporting:
+  enabled: false
+  provider: null
+  model: null
+  require_evidence: true

@@ -1,0 +1,18 @@
+# Local data and generated assets
+data/raw/
+data/annotations/
+artifacts/
+models/
+
+# Local configuration and Python files
+configs/config.local.yaml
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
