@@ -1,12 +1,13 @@
-﻿"""Video metadata reading backed by OpenCV.
+"""Video metadata reading and frame sampling backed by OpenCV."""
 
-Frame sampling intentionally remains outside Sprint 1 Task 1. This module only
-opens a video long enough to read its container-exposed metadata.
-"""
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from dataclasses import dataclass
 from importlib import import_module
+
+from numpy.typing import NDArray
 
 from gamesight.domain.models import VideoInput, VideoMetadata
 
@@ -25,18 +26,41 @@ class VideoReadError(RuntimeError):
     """Raised when OpenCV cannot open a video for metadata inspection."""
 
 
+class FrameSamplingError(RuntimeError):
+    """Raised when frame sampling cannot proceed (e.g. missing FPS)."""
+
+
+@dataclass(frozen=True)
+class VideoFrame:
+    """A single decoded frame yielded by the ingestion layer.
+
+    The image is stored as a BGR numpy array (OpenCV native format).
+    Downstream modules that need RGB should convert explicitly.
+    """
+
+    frame_index: int
+    timestamp_sec: float
+    image: NDArray
+
+
 class OpenCVVideoReader(VideoReader):
-    """Read FPS, duration, dimensions, and codec without decoding all frames."""
+    """Read video metadata and sample frames via OpenCV.
+
+    Dependency injection: pass ``cv2_module`` to inject a mock backend for
+    testing. In production leave it ``None`` to import the real ``cv2``.
+    """
 
     def __init__(self, cv2_module: object | None = None) -> None:
         self._cv2 = cv2_module if cv2_module is not None else import_module("cv2")
 
+    # ── metadata inspection ────────────────────────────────────────────
+
     def inspect(self, video: VideoInput) -> VideoMetadata:
         """Return metadata reported by OpenCV for ``video``.
 
-        Duration is derived from frame count divided by FPS. Containers that do
-        not expose a valid FPS report ``None`` for duration rather than raising
-        or returning an invalid value.
+        Duration is derived from frame count divided by FPS. Containers that
+        do not expose a valid FPS report ``None`` for duration rather than
+        raising or returning an invalid value.
         """
         capture = self._cv2.VideoCapture(str(video.path))
         try:
@@ -48,7 +72,11 @@ class OpenCVVideoReader(VideoReader):
 
             return VideoMetadata(
                 fps=fps,
-                duration_sec=(frame_count / fps) if fps is not None and frame_count is not None else None,
+                duration_sec=(
+                    (frame_count / fps)
+                    if fps is not None and frame_count is not None
+                    else None
+                ),
                 width=self._positive_int(capture.get(self._cv2.CAP_PROP_FRAME_WIDTH)),
                 height=self._positive_int(capture.get(self._cv2.CAP_PROP_FRAME_HEIGHT)),
                 codec=self._decode_fourcc(capture.get(self._cv2.CAP_PROP_FOURCC)),
@@ -56,9 +84,63 @@ class OpenCVVideoReader(VideoReader):
         finally:
             capture.release()
 
-    def frames(self, video: VideoInput, sample_fps: float) -> Iterator[object]:
-        """Reserve frame sampling for a later Sprint 1 task."""
-        raise NotImplementedError("Frame sampling is not part of Sprint 1 Task 1.")
+    # ── frame sampling ─────────────────────────────────────────────────
+
+    def frames(self, video: VideoInput, sample_fps: float) -> Iterator[VideoFrame]:
+        """Yield decoded frames at a uniform rate close to ``sample_fps``.
+
+        The method computes a step interval from the video's container FPS
+        and uses ``CAP_PROP_POS_FRAMES`` to jump to each sample position
+        without decoding intermediate frames.
+
+        Raises ``FrameSamplingError`` when the video does not report a valid
+        native FPS, making uniform sampling impossible.
+        """
+        if sample_fps <= 0:
+            raise FrameSamplingError(
+                f"sample_fps must be positive, got {sample_fps}"
+            )
+
+        capture = self._cv2.VideoCapture(str(video.path))
+        try:
+            if not capture.isOpened():
+                raise VideoReadError(f"Unable to open video: {video.path}")
+
+            native_fps = self._positive_float(
+                capture.get(self._cv2.CAP_PROP_FPS)
+            )
+            if native_fps is None:
+                raise FrameSamplingError(
+                    f"Video FPS is unavailable; cannot compute sample interval"
+                )
+
+            total_frames = self._positive_int(
+                capture.get(self._cv2.CAP_PROP_FRAME_COUNT)
+            )
+            if total_frames is None or total_frames == 0:
+                return  # empty video — yield nothing
+
+            # Step in native frame units.  Clamp to at least 1 so we never
+            # get stuck re-reading the same frame when sample_fps > native_fps.
+            step = max(1, round(native_fps / sample_fps))
+
+            frame_index = 0
+            while frame_index < total_frames:
+                capture.set(self._cv2.CAP_PROP_POS_FRAMES, frame_index)
+                success, image = capture.read()
+                if not success:
+                    break
+
+                yield VideoFrame(
+                    frame_index=frame_index,
+                    timestamp_sec=frame_index / native_fps,
+                    image=image,
+                )
+                frame_index += step
+        finally:
+            capture.release()
+
+    # ── helpers ────────────────────────────────────────────────────────
 
     @staticmethod
     def _positive_float(value: float) -> float | None:
@@ -75,5 +157,7 @@ class OpenCVVideoReader(VideoReader):
         if code <= 0:
             return None
 
-        codec = "".join(chr((code >> (8 * offset)) & 0xFF) for offset in range(4)).rstrip("\x00")
+        codec = "".join(
+            chr((code >> (8 * offset)) & 0xFF) for offset in range(4)
+        ).rstrip("\x00")
         return codec or None
