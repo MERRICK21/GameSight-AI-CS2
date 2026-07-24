@@ -23,27 +23,7 @@ class CoachCategory(StrEnum):
 
 
 class CoachSuggestion(BaseModel):
-    """One evidence-based coaching suggestion for a specific round.
-
-    Parameters
-    ----------
-    suggestion_id:
-        Unique identifier (e.g. ``"aim_round_001_01"``).
-    category:
-        Coaching category.
-    round_id:
-        Round this suggestion applies to.
-    timestamp_sec:
-        Approximate timestamp in the video.
-    reasoning:
-        Why this suggestion is being made — grounded in pipeline evidence.
-    action:
-        Concrete recommended action the player should take.
-    confidence:
-        Confidence score (0-1).
-    evidence:
-        Evidence links backing this suggestion.
-    """
+    """One evidence-based coaching suggestion for a specific round."""
 
     suggestion_id: str
     category: CoachCategory
@@ -53,3 +33,18 @@ class CoachSuggestion(BaseModel):
     action: str
     confidence: float = Field(ge=0.0, le=1.0)
     evidence: list[EvidenceLink] = Field(default_factory=list)
+
+
+class CoachSummary(BaseModel):
+    """Post-match coaching summary with actionable practice recommendations.
+
+    Generated after all per-round suggestions are collected.  Provides
+    a high-level view of what the player did well, what needs work,
+    and concrete drills to improve.
+    """
+
+    strengths: list[str] = Field(default_factory=list)
+    weaknesses: list[str] = Field(default_factory=list)
+    practice_drills: list[str] = Field(default_factory=list)
+    focus_areas: list[str] = Field(default_factory=list)
+    overall_assessment: str = ""

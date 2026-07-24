@@ -15,7 +15,11 @@
     "settings": "分析设置",
     "sample_fps": "分析帧率",
     "sample_fps_help": "每秒采样帧数。越低越快，越高越精细。",
-    "language": "语言"
+    "language": "语言",
+    "player_filter": "按玩家筛选",
+    "player_filter_help": "只分析你的视角画面。跳过死亡后的观战画面。",
+    "player_name": "玩家名称",
+    "player_name_help": "你的游戏内名称（未来将支持 OCR 匹配）。当前跳过死亡后的观战帧。"
   },
   "run": {
     "button": "开始分析",
@@ -116,5 +120,80 @@
   },
   "hint_upload": "上传 CS2 录像（或启用演示模式），然后点击开始分析。",
   "nothing_here": "运行分析以查看结果。",
-  "loading": "加载中..."
+  "loading": "加载中...",
+  "coach_reasoning": {
+    "death_heavy": "本回合你死亡 {deaths} 次，仅击杀 {kills} 次。你的站位可能过于激进或暴露。",
+    "aggressive": "强势回合！{kills} 次击杀，零死亡。你的枪法和交战时机都很出色。",
+    "late_contact": "首次遇敌在 {time:.1f} 秒（占回合 {pct:.0f}%）。这表明打法偏被动或地图控制较慢。",
+    "early_contact": "遇敌时间 {time:.1f} 秒 -- 非常早。你可能在没有道具掩护的情况下冲入交战区域。",
+    "no_combat": "在 {duration:.0f} 秒的回合中无击杀或死亡。你可能过于被动或与团队脱节。",
+    "combat_density": "高交战密度：{total} 次交战 / {duration:.0f} 秒（{density:.1f} 次/分钟）。",
+    "kd_improving": "K/D 正在提升：前半段 {early:.1f} -> 后半段 {late:.1f}。你在比赛进程中适应得很好。",
+    "kd_declining": "K/D 正在下降：前半段 {early:.1f} -> 后半段 {late:.1f}。对手可能已经适应了你的打法。",
+    "early_deaths": "你在 {count}/{total} 个回合的前 30 秒内死亡（{pct:.0f}%）。过早死亡会给敌方带来巨大优势。",
+    "loss_streak": "你经历了 {streak} 连败。这可能表明心态失衡或对手在针对你的固定模式。",
+    "inconsistent": "回合间波动较大：击杀数从 {min} 到 {max}（平均 {avg:.1f}）。你的表现不够稳定。"
+  },
+  "coach_action": {
+    "death_heavy": "在掩体后架枪。探点前先使用闪光弹/烟雾弹。只在有明确优势时对枪。",
+    "aggressive": "保持准星预瞄习惯。每次击杀后检查站位，不要过度前压。",
+    "late_contact": "更早地控制地图关键区域。在前 15-20 秒使用道具争夺位置。",
+    "early_contact": "推进前使用闪光弹/烟雾弹。与队友协调以获得补枪机会。",
+    "no_combat": "与队友沟通。站在可以补枪的位置。如果打自由人，确保时机与团队同步。",
+    "combat_density": "优先保证存活而非追击杀。占据有利位置，让对手犯错。",
+    "kd_improving": "比赛前通过热身来确保从第一回合就进入状态。",
+    "kd_declining": "在不同回合之间变换打法。如果你总是探同一个角度，对手会提前预瞄。",
+    "early_deaths": "优先保证开局阶段的存活。使用更安全的行进路线，仔细检查每个拐角。",
+    "loss_streak": "连续输掉 2 回合后，进行心理重置。改变站位或尝试新的角度。",
+    "inconsistent": "注重稳定性。比赛前打 10 分钟死斗模式来稳定枪感。"
+  },
+  "live": {
+    "title": "实时分析",
+    "subtitle": "上传截图获取实时战术建议",
+    "upload_label": "上传游戏截图",
+    "upload_help": "从 CS2 游戏中截取的 JPG 或 PNG 截图。",
+    "analyze_btn": "分析截图",
+    "results": "战术建议",
+    "next_action": "推荐行动",
+    "status": "当前状态",
+    "tips": "关键提示"
+  },
+  "player_filter": {
+    "skipped_frames": "已跳过 {n} 帧观战画面（死亡后）",
+    "active": "玩家筛选已启用：仅分析你的视角"
+  },
+  "report_finding": {
+    "round_start": "回合在 {time:.1f} 秒开始。",
+    "round_end": "回合在 {time:.1f} 秒结束（持续 {dur:.1f} 秒）。",
+    "round_truncated": "回合在视频结束前未完成 -- 分析可能不完整。",
+    "kills_detected": "本回合检测到 {n} 次击杀。",
+    "deaths_detected": "本回合检测到 {n} 次死亡。",
+    "no_combat": "本回合未检测到击杀或死亡。",
+    "enemy_first_visible": "首次遇敌在 {time:.1f} 秒。",
+    "enemy_tracks": "本回合有 {n} 个敌方玩家轨迹。",
+    "match_rounds": "分析了视频 \"{vid}\" 的 {n} 个回合（时长 {dur} 秒）。",
+    "match_total_kills": "全部回合共检测到 {n} 次击杀。",
+    "match_total_deaths": "全部回合共检测到 {n} 次死亡。",
+    "match_no_combat": "整场比赛未检测到战斗事件（击杀或死亡）。"
+  },
+  "live_advice": {
+    "hp_critical": "HP 危急 ({hp}) -- 一枪就死",
+    "hp_low": "HP 偏低 ({hp})",
+    "hp_moderate": "HP 中等 ({hp})",
+    "hp_healthy": "HP 健康 ({hp})",
+    "action_hp_critical": "立即撤回掩体后。等待队友支援或守住防守角度。",
+    "action_hp_low": "守住一个非常规角度。避免干拉常规点位。",
+    "action_freeze": "准备下一回合：检查经济并规划购买。",
+    "tip_hp_critical": "{hp} HP 下任何步枪子弹都能击杀你。留在掩体后让队友补枪。",
+    "tip_hp_low": "考虑让队友发枪或交换站位。",
+    "tip_armour_low": "护甲值低。下回合经济允许时购买全甲。",
+    "tip_crosshair_steady": "准星稳定 -- 适合预瞄常规角度。",
+    "tip_crosshair_moving": "未检测到准星 -- 你可能在移动中。停下并重新瞄准。",
+    "tip_killfeed": "击杀信息活跃 -- 附近有人被消灭。",
+    "tip_killfeed_cautious": "小心：附近刚发生交火。守住当前位置或安全转点。",
+    "tip_money": "检查经济状况，规划下回合购买。",
+    "tip_default": "未检测到特定威胁 -- 保持地图意识，关注小地图。",
+    "round_active": "回合进行中",
+    "round_inactive": "回合未激活（冻结时间或已结束）"
+  }
 }
