@@ -1,0 +1,133 @@
+{
+  "lang_name": "English",
+  "lang_code": "en",
+
+  "app": {
+    "title": "GameSight AI",
+    "subtitle": "CS2 POV Analysis Pipeline",
+    "version": "v0.1.0"
+  },
+
+  "sidebar": {
+    "input": "Input",
+    "demo_mode": "Demo Mode (synthetic data)",
+    "demo_help": "Use synthetic CS2 match data — instant, no video needed.",
+    "upload_label": "Upload CS2 recording",
+    "upload_help": "Select a CS2 first-person POV recording. 16:9 (1920×1080) recommended.",
+    "settings": "Analysis Settings",
+    "sample_fps": "Analysis FPS",
+    "sample_fps_help": "Frames sampled per second. Lower = faster, higher = more detail.",
+    "language": "Language"
+  },
+
+  "run": {
+    "button": "Run Analysis",
+    "uploading": "Uploading video...",
+    "reading_meta": "Reading video metadata...",
+    "processing": "Processing frames ({w}x{h}, {fps}fps)...",
+    "processing_frame": "Processing frame {n}...",
+    "detecting_events": "Detecting events in {n} frames...",
+    "building": "Building timeline & report...",
+    "complete": "Analysis complete!",
+    "generating_demo": "Generating demo events...",
+    "aggregating": "Aggregating rounds...",
+    "building_report": "Building report..."
+  },
+
+  "tabs": {
+    "overview": "Overview",
+    "timeline": "Timeline",
+    "report": "Report",
+    "evidence": "Evidence",
+    "json": "JSON",
+    "coach": "AI Coach"
+  },
+
+  "overview": {
+    "match_overview": "Match Overview",
+    "video": "Video",
+    "rounds": "Rounds",
+    "duration": "Duration",
+    "kills": "Kills",
+    "deaths": "Deaths",
+    "enemy_tracks": "Enemy Tracks",
+    "resolution": "Resolution",
+    "fps_label": "FPS",
+    "round_summary": "Round Summary",
+    "round": "Round",
+    "killfeed": "Killfeed",
+    "first_enemy": "1st Enemy"
+  },
+
+  "timeline": {
+    "title": "Event Timeline",
+    "no_findings": "No findings for this round.",
+    "evidence_links": "Evidence links",
+    "truncated": "truncated",
+    "confidence": "conf",
+    "frame": "frame",
+    "source": "source"
+  },
+
+  "report": {
+    "title": "Evidence Report",
+    "match_summary": "Match Summary",
+    "duration_label": "Duration",
+    "kills_label": "Kills",
+    "deaths_label": "Deaths",
+    "enemy_tracks_label": "Enemy Tracks",
+    "first_enemy_label": "1st Enemy At"
+  },
+
+  "evidence": {
+    "title": "Evidence Explorer",
+    "no_links": "No evidence links in the report.",
+    "count": "{n} evidence links across all rounds",
+    "round_col": "Round",
+    "finding_col": "Finding",
+    "category_col": "Category",
+    "frame_col": "Frame",
+    "time_col": "Time",
+    "source_col": "Source"
+  },
+
+  "json": {
+    "title": "Raw JSON",
+    "download_report": "Download Report JSON",
+    "download_timeline": "Download Timeline JSON",
+    "preview": "Preview"
+  },
+
+  "coach": {
+    "title": "AI Coach",
+    "subtitle": "Evidence-based coaching suggestions",
+    "no_suggestions": "No coaching suggestions available for this match.",
+    "round_label": "Round",
+    "timestamp": "Timestamp",
+    "category": "Category",
+    "reasoning": "Reasoning",
+    "action": "Recommended Action",
+    "confidence": "Confidence",
+    "evidence": "Evidence",
+    "categories": {
+      "aim": "Aim",
+      "positioning": "Positioning",
+      "game_sense": "Game Sense",
+      "utility": "Utility Usage",
+      "economy": "Economy",
+      "teamplay": "Teamplay"
+    }
+  },
+
+  "how_it_works": {
+    "title": "How it works",
+    "step1": "Upload your CS2 first-person recording (.mp4, .mov, .mkv)",
+    "step2": "Configure analysis FPS (lower = faster)",
+    "step3": "Run the pipeline — HUD parsing, event detection, report generation",
+    "step4": "Explore the results across tabs"
+  },
+
+  "hint_upload": "Upload a CS2 recording (or enable Demo Mode), then click Run Analysis.",
+  "nothing_here": "Run the analysis to see results.",
+  "loading": "Loading..."
+}

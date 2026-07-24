@@ -1,17 +1,10 @@
-"""GameSight AI for CS2 — Streamlit Demo Application.
+"""GameSight AI for CS2 鈥?Streamlit Web Application.
 
 Usage
 -----
 .. code-block:: bash
 
     streamlit run src/gamesight/web/app.py
-
-The app provides a full GUI for the analysis pipeline:
-1. Upload a CS2 POV recording (or use demo mode)
-2. Configure pipeline parameters
-3. Run analysis with live progress
-4. Browse results: timeline, evidence report, raw JSON
-5. Export results to file
 """
 
 from __future__ import annotations
@@ -22,57 +15,34 @@ from pathlib import Path
 
 import streamlit as st
 
-from gamesight.domain.models import AnalysisResult, Track
+from gamesight.coach.engine import RuleBasedCoach
+from gamesight.domain.models import AnalysisResult, VideoInput
+from gamesight.events.aggregator import aggregate_events
+from gamesight.events.detectors import KillEventDetector, RoundBoundaryDetector
+from gamesight.evidence.extractor import OpenCVScreenshotExtractor
+from gamesight.i18n.loader import I18nLoader
+from gamesight.ingestion.video_reader import OpenCVVideoReader
+from gamesight.perception.extractors import (
+    CrosshairExtractor,
+    HPBarExtractor,
+    KillFeedExtractor,
+    MoneyExtractor,
+    RoundInfoExtractor,
+)
+from gamesight.perception.hud_parser import CS2HudParser
+from gamesight.perception.hud_profiles import CS2_STANDARD_16X9
 from gamesight.reporting.builder import EvidenceReportBuilder
-from gamesight.serialization.timeline import TimelineBuilder
-from gamesight.web.demo import generate_demo_events, generate_demo_tracks, run_demo_pipeline
+from gamesight.web.demo import generate_demo_events, generate_demo_tracks
 
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="GameSight AI — CS2",
-    page_icon="🎯",
+    page_title="GameSight AI",
+    page_icon="馃幆",
     layout="wide",
     initial_sidebar_state="expanded",
-)
-
-# ---------------------------------------------------------------------------
-# CSS
-# ---------------------------------------------------------------------------
-
-st.markdown(
-    """
-<style>
-    .finding-card {
-        border-left: 4px solid #555;
-        padding: 0.5rem 1rem;
-        margin: 0.5rem 0;
-        border-radius: 4px;
-        background: #1a1a2e;
-    }
-    .finding-card.info { border-left-color: #4fc3f7; }
-    .finding-card.warning { border-left-color: #ffb74d; }
-    .finding-card.critical { border-left-color: #ef5350; }
-    .evidence-link {
-        font-family: monospace;
-        font-size: 0.8rem;
-        color: #888;
-    }
-    .stat-value {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #4fc3f7;
-    }
-    .stat-label {
-        font-size: 0.8rem;
-        color: #888;
-        text-transform: uppercase;
-    }
-</style>
-""",
-    unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -81,408 +51,372 @@ st.markdown(
 
 DEFAULTS = {
     "analysis_run": False,
-    "analysis_result": None,
-    "match_timeline": None,
-    "match_report": None,
+    "result": None,
+    "analysis_obj": None,
     "tracks": None,
     "progress": 0,
     "status": "",
-    "demo_video_path": None,
+    "coach_suggestions": None,
+    "screenshots": None,
+    "locale": "en",
 }
 
 for key, val in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = val
 
+# ---------------------------------------------------------------------------
+# i18n helper
+# ---------------------------------------------------------------------------
+
+def _t(key: str, **kwargs) -> str:
+    locale = st.session_state.get("locale", "en")
+    loader = I18nLoader(locale)
+    return loader.t(key, **kwargs)
 
 # ---------------------------------------------------------------------------
-# Pipeline runner adapter (with streamlit progress)
+# Pipeline runners
 # ---------------------------------------------------------------------------
 
-def _run_with_progress(video_path: str, sample_fps: float):
-    """Thin wrapper that adds streamlit progress updates."""
-    st.session_state["status"] = "Generating events..."
+def _run_real_pipeline(video_path: str, sample_fps: float) -> dict:
+    st.session_state["status"] = _t("run.reading_meta")
+    st.session_state["progress"] = 5
+
+    video = VideoInput(video_id=Path(video_path).stem, path=Path(video_path))
+    reader = OpenCVVideoReader()
+    metadata = reader.inspect(video)
+
+    st.session_state["status"] = _t("run.processing", w=metadata.width or 0, h=metadata.height or 0, fps=metadata.fps or 0)
     st.session_state["progress"] = 10
 
-    analysis, tracks = run_demo_pipeline(video_path, sample_fps)
-    st.session_state["progress"] = 60
+    parser = CS2HudParser(extractors=[
+        CrosshairExtractor(), HPBarExtractor(), KillFeedExtractor(),
+        MoneyExtractor(), RoundInfoExtractor(),
+    ])
 
-    st.session_state["status"] = "Building timeline & report..."
-    tl = TimelineBuilder().build(analysis, tracks)
-    st.session_state["match_timeline"] = tl
+    hud_states = []
+    total_frames = int((metadata.duration_sec or 60) * sample_fps)
+    count = 0
+    for frame in reader.frames(video, sample_fps):
+        state = parser.parse(frame.image, frame.frame_index, frame.timestamp_sec)
+        hud_states.append(state)
+        count += 1
+        if count % 30 == 0:
+            pct = min(10 + int(60 * count / max(total_frames, 1)), 70)
+            st.session_state["progress"] = pct
+            st.session_state["status"] = _t("run.processing_frame", n=count)
 
-    report = EvidenceReportBuilder().build(analysis, tracks)
-    st.session_state["match_report"] = report
+    st.session_state["status"] = _t("run.detecting_events", n=len(hud_states))
+    st.session_state["progress"] = 75
 
-    st.session_state["analysis_result"] = analysis
-    st.session_state["tracks"] = tracks
+    rbd = RoundBoundaryDetector()
+    ked = KillEventDetector()
+    events = []
+    for state in hud_states:
+        events.extend(rbd.update(state))
+        events.extend(ked.update(state))
+    events.extend(rbd.finalize())
+    events.extend(ked.finalize())
+
+    rounds = aggregate_events(events)
+    st.session_state["progress"] = 85
+    analysis = AnalysisResult(video=video, metadata=metadata, rounds=rounds)
+    st.session_state["analysis_obj"] = analysis
+
+    st.session_state["status"] = _t("run.building")
+    coach = RuleBasedCoach()
+    report_builder = EvidenceReportBuilder()
+    st.session_state["coach_suggestions"] = coach.generate(analysis, report_builder.build(analysis))
+
+    report = report_builder.build(analysis)
     st.session_state["progress"] = 100
-    st.session_state["status"] = "Complete!"
+    st.session_state["status"] = _t("run.complete")
+    return report.model_dump(mode="json")
+
+
+def _run_demo_pipeline() -> dict:
+    from gamesight.domain.models import VideoMetadata
+
+    st.session_state["status"] = _t("run.generating_demo")
+    st.session_state["progress"] = 10
+
+    events = generate_demo_events(rounds=5)
+    tracks = generate_demo_tracks()
+
+    st.session_state["progress"] = 40
+    rounds = aggregate_events(events)
+
+    st.session_state["progress"] = 60
+    analysis = AnalysisResult(
+        video=VideoInput(video_id="demo_cs2_match", path=Path("demo.mp4")),
+        metadata=VideoMetadata(duration_sec=640.0, fps=30.0, width=1920, height=1080),
+        rounds=rounds,
+    )
+    st.session_state["analysis_obj"] = analysis
+    st.session_state["tracks"] = tracks
+
+    report_builder = EvidenceReportBuilder()
+    coach = RuleBasedCoach()
+    st.session_state["coach_suggestions"] = coach.generate(analysis, report_builder.build(analysis, tracks))
+
+    report = report_builder.build(analysis, tracks)
+    st.session_state["progress"] = 100
+    st.session_state["status"] = _t("run.complete")
+    return report.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
-def _render_sidebar() -> dict:
-    """Render the sidebar and return configuration dict."""
-    with st.sidebar:
-        st.title("🎯 GameSight AI")
-        st.caption("CS2 POV Analysis Pipeline")
+with st.sidebar:
+    st.title(f"馃幆 {_t('app.title')}")
+    st.caption(_t("app.subtitle"))
 
-        st.divider()
+    st.divider()
 
-        st.subheader("📁 Input")
-        use_demo = st.checkbox("Demo Mode (synthetic data)", value=True)
+    lang = st.selectbox(
+        _t("sidebar.language"),
+        options=["en", "zh-CN"],
+        format_func=lambda x: {"en": "English", "zh-CN": "简体中文"locale"] == "en" else 1,
+    )
+    if lang != st.session_state["locale"]:
+        st.session_state["locale"] = lang
+        st.rerun()
 
-        uploaded = None
-        if not use_demo:
-            uploaded = st.file_uploader(
-                "Upload CS2 recording",
-                type=["mp4", "mov", "mkv"],
-                help="Select a CS2 POV gameplay recording.",
-            )
+    st.divider()
+    st.subheader(f"馃搧 {_t('sidebar.input')}")
 
-        st.divider()
+    use_demo = st.checkbox(_t("sidebar.demo_mode"), value=False, help=_t("sidebar.demo_help"))
 
-        st.subheader("⚙️ Pipeline")
-        sample_fps = st.slider(
-            "Analysis FPS",
-            min_value=1, max_value=30, value=10, step=1,
-            help="Frames sampled per second for HUD parsing and detection.",
+    uploaded = None
+    if not use_demo:
+        uploaded = st.file_uploader(
+            _t("sidebar.upload_label"),
+            type=["mp4", "mov", "mkv"],
+            help=_t("sidebar.upload_help"),
         )
 
-        st.divider()
+    st.divider()
+    st.subheader(f"鈿欙笍 {_t('sidebar.settings')}")
 
-        st.subheader("🎯 Detection & Tracking")
-        enable_detection = st.checkbox("Object Detection (YOLO)", value=False, disabled=True,
-                                       help="Requires YOLO model file.")
-        enable_tracking = st.checkbox("Tracking (IOU)", value=False, disabled=True,
-                                      help="Requires detection to be enabled.")
+    sample_fps = st.slider(
+        _t("sidebar.sample_fps"),
+        min_value=1, max_value=30, value=10, step=1,
+        help=_t("sidebar.sample_fps_help"),
+    )
 
-        st.divider()
-
-        st.caption("GameSight v0.1.0 · Sprint 8")
-
-    return {
-        "demo": use_demo,
-        "uploaded": uploaded,
-        "sample_fps": float(sample_fps),
-        "detection": enable_detection,
-        "tracking": enable_tracking,
-    }
-
+    st.divider()
+    st.caption(f"{_t('app.version')} 路 356 tests")
 
 # ---------------------------------------------------------------------------
-# Run button + progress
+# Run button
 # ---------------------------------------------------------------------------
 
-def _render_run_section(config: dict):
-    """Render the Run button and progress bar."""
-    col1, col2 = st.columns([1, 3])
+col1, col2 = st.columns([1, 3])
 
-    with col1:
-        run_clicked = st.button(
-            "▶️ Run Analysis",
-            type="primary",
-            use_container_width=True,
-            disabled=not config["demo"] and config["uploaded"] is None,
-        )
+with col1:
+    can_run = use_demo or (uploaded is not None)
+    run_clicked = st.button(
+        f"鈻讹笍 {_t('run.button')}",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_run,
+    )
 
-    with col2:
-        if 0 < st.session_state["progress"] < 100:
-            st.progress(st.session_state["progress"] / 100, text=st.session_state["status"])
-        elif st.session_state["progress"] == 100:
-            st.success("✅ Analysis complete!")
+with col2:
+    if st.session_state["progress"] > 0:
+        st.progress(st.session_state["progress"] / 100, text=st.session_state["status"])
 
-    if run_clicked:
-        st.session_state["progress"] = 0
-        st.session_state["analysis_run"] = True
+if run_clicked:
+    st.session_state["analysis_run"] = True
+    st.session_state["progress"] = 0
+    st.session_state["result"] = None
+    st.session_state["coach_suggestions"] = None
+    st.session_state["screenshots"] = None
 
-        with st.spinner("Running analysis pipeline..."):
-            if config["demo"]:
-                video_path = "demo_cs2_match.mp4"
-            elif config["uploaded"] is not None:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
-                    f.write(config["uploaded"].read())
-                    video_path = f.name
-            else:
-                st.error("No video provided.")
-                return
+    with st.spinner(_t("loading")):
+        if use_demo:
+            result = _run_demo_pipeline()
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
+                f.write(uploaded.read())
+                video_path = f.name
+            try:
+                result = _run_real_pipeline(video_path, sample_fps)
+                # Extract screenshots for important events
+                extractor = OpenCVScreenshotExtractor(max_screenshots=30)
+                analysis = st.session_state.get("analysis_obj")
+                if analysis is not None:
+                    important = [e for r in analysis.rounds for e in r.events
+                                 if e.event_type.value in ("player_kill", "player_death", "round_start", "enemy_first_visible")]
+                    st.session_state["screenshots"] = extractor.extract(video_path, important)
+            finally:
+                Path(video_path).unlink(missing_ok=True)
 
-            _run_with_progress(video_path, config["sample_fps"])
-            st.rerun()
-
+        st.session_state["result"] = result
+        st.rerun()
 
 # ---------------------------------------------------------------------------
-# Overview tab
+# Results
 # ---------------------------------------------------------------------------
 
-def _render_overview():
-    """Render the match overview tab."""
-    report = st.session_state.get("match_report")
-    if report is None:
-        st.info("Run the analysis to see results.")
-        return
+result = st.session_state.get("result")
+coach_suggestions = st.session_state.get("coach_suggestions")
+screenshots = st.session_state.get("screenshots")
 
-    overview = report.overview
+if result is None:
+    if not st.session_state.get("analysis_run"):
+        st.info(_t("hint_upload"))
+        st.markdown(f"### {_t('how_it_works.title')}")
+        st.markdown(f"1. {_t('how_it_works.step1')}")
+        st.markdown(f"2. {_t('how_it_works.step2')}")
+        st.markdown(f"3. {_t('how_it_works.step3')}")
+        st.markdown(f"4. {_t('how_it_works.step4')}")
+    st.stop()
 
-    st.subheader("📊 Match Overview")
+# ---- Tabs ----
+tabs = [
+    f"馃搳 {_t('tabs.overview')}", f"馃搮 {_t('tabs.timeline')}", f"馃摑 {_t('tabs.report')}",
+    f"馃敆 {_t('tabs.evidence')}", f"馃 {_t('tabs.coach')}", f"馃搫 {_t('tabs.json')}",
+]
+t1, t2, t3, t4, t5, t6 = st.tabs(tabs)
 
+# ===== Overview =====
+with t1:
+    ov = result["overview"]
+    st.subheader(_t("overview.match_overview"))
     cols = st.columns(5)
-    cols[0].metric("🎬 Video ID", overview.video_id)
-    cols[1].metric("🔄 Rounds", overview.total_rounds)
-    cols[2].metric("⏱️ Duration", f"{overview.duration_sec:.0f}s" if overview.duration_sec else "N/A")
-    cols[3].metric("🎯 Kills", overview.total_kills_detected)
-    cols[4].metric("💀 Deaths", overview.total_deaths_detected)
+    cols[0].metric(_t("overview.video"), ov["video_id"])
+    cols[1].metric(_t("overview.rounds"), ov["total_rounds"])
+    cols[2].metric(_t("overview.duration"), f"{ov.get('duration_sec',0):.0f}s" if ov.get("duration_sec") else "N/A")
+    cols[3].metric(_t("overview.kills"), ov["total_kills_detected"])
+    cols[4].metric(_t("overview.deaths"), ov["total_deaths_detected"])
 
     st.divider()
-
-    cols2 = st.columns(3)
-    cols2[0].metric("👁️ Enemy Tracks", overview.total_enemy_tracks)
-    cols2[1].metric("📐 Resolution", f"{overview.resolution.get('width', '?')}×{overview.resolution.get('height', '?')}")
-    cols2[2].metric("🎞️ FPS", f"{overview.fps:.0f}" if overview.fps else "N/A")
-
-    st.divider()
-    st.subheader("📋 Round Summary")
-
-    round_data = []
-    for rr in report.rounds:
-        s = rr.stats
-        round_data.append({
-            "Round": rr.round_id,
-            "Duration": f"{rr.duration_sec:.1f}s" if rr.duration_sec else "—",
-            "Kills": s.kills_detected,
-            "Deaths": s.deaths_detected,
-            "Killfeed": s.killfeed_events,
-            "Enemy Tracks": s.enemy_tracks,
-            "1st Enemy": f"{s.enemy_first_visible_sec:.1f}s" if s.enemy_first_visible_sec else "—",
+    st.subheader(_t("overview.round_summary"))
+    rows = []
+    for r in result.get("rounds", []):
+        s = r["stats"]
+        rows.append({
+            _t("overview.round"): r["round_id"],
+            _t("overview.duration"): f"{r.get('duration_sec',0):.1f}s" if r.get("duration_sec") else "鈥?,
+            _t("overview.kills"): s["kills_detected"],
+            _t("overview.deaths"): s["deaths_detected"],
+            _t("overview.killfeed"): s["killfeed_events"],
+            _t("overview.enemy_tracks"): s["enemy_tracks"],
+            _t("overview.first_enemy"): f"{s.get('enemy_first_visible_sec',0):.1f}s" if s.get("enemy_first_visible_sec") else "鈥?,
         })
+    st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    st.dataframe(round_data, use_container_width=True, hide_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Timeline tab
-# ---------------------------------------------------------------------------
-
-def _render_timeline():
-    """Render the timeline tab showing all events chronologically."""
-    report = st.session_state.get("match_report")
-    if report is None:
-        st.info("Run the analysis to see results.")
-        return
-
-    st.subheader("📅 Event Timeline")
-
-    for rr in report.rounds:
-        label = f"**{rr.round_id}**  ·  {rr.duration_sec:.1f}s" if rr.duration_sec else f"**{rr.round_id}**  ·  truncated"
-        with st.expander(label, expanded=len(report.rounds) <= 2):
-            if not rr.findings:
-                st.caption("No findings for this round.")
-                continue
-
-            for f in rr.findings:
-                severity_class = f.severity.value
+# ===== Timeline =====
+with t2:
+    st.subheader(_t("timeline.title"))
+    for r in result.get("rounds", []):
+        label = f"**{r['round_id']}** 路 {r['duration_sec']:.1f}s" if r.get("duration_sec") else f"**{r['round_id']}** 路 {_t('timeline.truncated')}"
+        with st.expander(label, expanded=len(result["rounds"]) <= 2):
+            for f in r.get("findings", []):
+                sev = f["severity"]
+                color = {"info": "#4fc3f7", "warning": "#ffb74d", "critical": "#ef5350"}.get(sev, "#888")
                 st.markdown(
-                    f"""<div class="finding-card {severity_class}">
-                        <strong>[{f.severity.value.upper()}]</strong> {f.text}
-                        <br><span class="evidence-link">confidence: {f.confidence:.2f} · id: {f.finding_id}</span>
+                    f"""<div style="border-left:4px solid {color};padding:.5rem 1rem;margin:.4rem 0;border-radius:0 6px 6px 0;background:#161b22">
+                    <strong>[{sev.upper()}]</strong> {f['text']}<br>
+                    <small style="color:#8b949e">{_t('timeline.confidence')}: {f['confidence']:.2f} 路 {f['finding_id']}</small>
                     </div>""",
                     unsafe_allow_html=True,
                 )
+                # Show screenshot if available
+                if screenshots:
+                    matching = [s for s in screenshots if s.event_id == f.get("finding_id") or s.event_id in [lk.get("source","") for lk in f.get("evidence",[])]]
+                    for img in matching[:1]:
+                        if img.exists():
+                            st.image(str(img.image_path), caption=f"{_t('timeline.frame')} {img.frame_index} 路 t={img.timestamp_sec:.1f}s", width=400)
+                if f.get("evidence"):
+                    with st.expander(_t("timeline.evidence_links"), expanded=False):
+                        for lk in f["evidence"]:
+                            st.caption(f"{_t('timeline.frame')}={lk.get('frame_index','?')} 路 t={lk['timestamp_sec']:.1f}s 路 {lk['source']}")
 
-                if f.evidence:
-                    with st.expander("🔗 Evidence", expanded=False):
-                        for link in f.evidence:
-                            st.caption(
-                                f"frame={link.frame_index or '?'}  ·  "
-                                f"t={link.timestamp_sec:.2f}s  ·  "
-                                f"source={link.source}"
-                            )
-
-
-# ---------------------------------------------------------------------------
-# Report tab
-# ---------------------------------------------------------------------------
-
-def _render_report():
-    """Render the evidence report as a structured document."""
-    report = st.session_state.get("match_report")
-    if report is None:
-        st.info("Run the analysis to see results.")
-        return
-
-    st.subheader("📝 Evidence Report")
-
-    # Match-level findings
-    st.markdown("### Match Summary")
-    for f in report.match_findings:
-        severity_class = f.severity.value
-        st.markdown(
-            f"""<div class="finding-card {severity_class}">
-                <strong>[{f.severity.value.upper()}]</strong> {f.text}
-            </div>""",
-            unsafe_allow_html=True,
-        )
-
+# ===== Report =====
+with t3:
+    st.subheader(_t("report.title"))
+    st.markdown(f"### {_t('report.match_summary')}")
+    for f in result.get("match_findings", []):
+        sev = f["severity"]
+        icon = {"info": "鈩癸笍", "warning": "鈿狅笍", "critical": "馃毃"}.get(sev, "")
+        st.markdown(f"{icon} **[{sev.upper()}]** {f['text']}")
     st.divider()
 
-    for rr in report.rounds:
-        st.markdown(f"### Round {rr.round_id}")
-        if rr.duration_sec:
-            st.caption(f"Duration: {rr.duration_sec:.1f}s")
-        else:
-            st.caption("Truncated round — video ended mid-round")
-
-        s = rr.stats
-        cols = st.columns(4)
-        cols[0].metric("Kills", s.kills_detected)
-        cols[1].metric("Deaths", s.deaths_detected)
-        cols[2].metric("Enemy Tracks", s.enemy_tracks)
-        cols[3].metric("1st Enemy At", f"{s.enemy_first_visible_sec:.1f}s" if s.enemy_first_visible_sec else "N/A")
-
-        for f in rr.findings:
-            sev = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(f.severity.value, "")
-            st.markdown(f"{sev} {f.text}")
-            if f.evidence:
-                with st.expander("Evidence links"):
-                    for link in f.evidence:
-                        st.code(
-                            f"frame={link.frame_index} t={link.timestamp_sec:.1f}s src={link.source}",
-                            language=None,
-                        )
-
+    for r in result.get("rounds", []):
+        st.markdown(f"### {r['round_id']}")
+        if r.get("duration_sec"):
+            st.caption(f"{_t('report.duration_label')}: {r['duration_sec']:.1f}s")
+        s = r["stats"]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(_t("report.kills_label"), s["kills_detected"])
+        c2.metric(_t("report.deaths_label"), s["deaths_detected"])
+        c3.metric(_t("report.enemy_tracks_label"), s["enemy_tracks"])
+        c4.metric(_t("report.first_enemy_label"), f"{s.get('enemy_first_visible_sec',0):.1f}s" if s.get("enemy_first_visible_sec") else "N/A")
+        for f in r.get("findings", []):
+            icon = {"info": "鈩癸笍", "warning": "鈿狅笍", "critical": "馃毃"}.get(f["severity"], "")
+            st.markdown(f"{icon} {f['text']}")
         st.divider()
 
-
-# ---------------------------------------------------------------------------
-# Evidence tab
-# ---------------------------------------------------------------------------
-
-def _render_evidence():
-    """Render all evidence links across the report in one view."""
-    report = st.session_state.get("match_report")
-    if report is None:
-        st.info("Run the analysis to see results.")
-        return
-
-    st.subheader("🔗 Evidence Explorer")
-
-    all_links: list[dict] = []
-    for rr in report.rounds:
-        for f in rr.findings:
-            for link in f.evidence:
-                all_links.append({
-                    "Round": rr.round_id,
-                    "Finding": f.finding_id,
-                    "Category": f.category.value,
-                    "Frame": link.frame_index or "—",
-                    "Timestamp": f"{link.timestamp_sec:.2f}s",
-                    "Source": link.source,
-                    "Asset": link.asset_path or "—",
+# ===== Evidence =====
+with t4:
+    st.subheader(_t("evidence.title"))
+    links = []
+    for r in result.get("rounds", []):
+        for f in r.get("findings", []):
+            for lk in f.get("evidence", []):
+                links.append({
+                    _t("evidence.round_col"): r["round_id"],
+                    _t("evidence.finding_col"): f["finding_id"],
+                    _t("evidence.category_col"): f["category"],
+                    _t("evidence.frame_col"): lk.get("frame_index", "鈥?),
+                    _t("evidence.time_col"): f"{lk['timestamp_sec']:.1f}s",
+                    _t("evidence.source_col"): lk["source"],
                 })
-
-    if not all_links:
-        st.info("No evidence links in the report.")
-        return
-
-    st.caption(f"{len(all_links)} evidence links across all rounds")
-    st.dataframe(all_links, use_container_width=True, hide_index=True)
-
-
-# ---------------------------------------------------------------------------
-# Raw JSON tab
-# ---------------------------------------------------------------------------
-
-def _render_raw_json():
-    """Render raw JSON exports of timeline and report."""
-    timeline = st.session_state.get("match_timeline")
-    report = st.session_state.get("match_report")
-
-    if timeline is None and report is None:
-        st.info("Run the analysis to see results.")
-        return
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("📄 Timeline JSON")
-        if timeline is not None:
-            tl_json = timeline.model_dump(mode="json")
-            st.download_button(
-                "⬇️ Download Timeline",
-                data=json.dumps(tl_json, indent=2, ensure_ascii=False),
-                file_name=f"timeline_{timeline.video_id}.json",
-                mime="application/json",
-            )
-            with st.expander("Preview", expanded=False):
-                st.json(tl_json)
-        else:
-            st.caption("No timeline available.")
-
-    with col2:
-        st.subheader("📝 Report JSON")
-        if report is not None:
-            rpt_json = report.model_dump(mode="json")
-            st.download_button(
-                "⬇️ Download Report",
-                data=json.dumps(rpt_json, indent=2, ensure_ascii=False, default=str),
-                file_name=f"report_{report.overview.video_id}.json",
-                mime="application/json",
-            )
-            with st.expander("Preview", expanded=False):
-                st.json(rpt_json)
-        else:
-            st.caption("No report available.")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    """Streamlit entry point."""
-    st.title("GameSight AI — CS2 Analysis")
-    st.caption("Upload a CS2 POV recording and get an evidence-grounded match report.")
-
-    config = _render_sidebar()
-    _render_run_section(config)
-
-    if st.session_state.get("analysis_run"):
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📊 Overview", "📅 Timeline", "📝 Report", "🔗 Evidence", "📄 Raw JSON"
-        ])
-
-        with tab1:
-            _render_overview()
-
-        with tab2:
-            _render_timeline()
-
-        with tab3:
-            _render_report()
-
-        with tab4:
-            _render_evidence()
-
-        with tab5:
-            _render_raw_json()
-
+    if links:
+        st.caption(_t("evidence.count", n=len(links)))
+        st.dataframe(links, use_container_width=True, hide_index=True)
     else:
-        st.info("👈 Configure the pipeline in the sidebar and click **Run Analysis** to begin.")
-        st.markdown("""
-        ### What GameSight does
+        st.info(_t("evidence.no_links"))
 
-        1. **Ingests** your CS2 POV recording
-        2. **Parses HUD** — crosshair, HP, armour, kill feed, money, round info
-        3. **Detects players** with YOLO and classifies enemy/teammate
-        4. **Tracks** players across frames with IOU matching
-        5. **Detects events** — round boundaries, kills, deaths, enemy encounters
-        6. **Aggregates** events into a structured timeline
-        7. **Generates** an evidence-grounded report with traceable findings
-        """)
+# ===== AI Coach =====
+with t5:
+    st.subheader(f"馃 {_t('coach.title')}")
+    st.caption(_t("coach.subtitle"))
 
+    if not coach_suggestions:
+        st.info(_t("coach.no_suggestions"))
+    else:
+        for s in coach_suggestions:
+            cat_name = _t(f"coach.categories.{s.category.value}")
+            with st.expander(f"**{cat_name}** 鈥?{_t('coach.round_label')} {s.round_id} 路 t={s.timestamp_sec:.1f}s", expanded=len(coach_suggestions) <= 4):
+                st.markdown(f"**{_t('coach.reasoning')}:** {s.reasoning}")
+                st.markdown(f"**{_t('coach.action')}:** {s.action}")
+                st.caption(f"{_t('coach.confidence')}: {s.confidence:.2f} 路 id: {s.suggestion_id}")
 
-if __name__ == "__main__":
-    main()
+                # Show screenshot if available
+                if screenshots:
+                    for img in screenshots:
+                        if abs(img.timestamp_sec - s.timestamp_sec) < 1.0 and img.exists():
+                            st.image(str(img.image_path), caption=f"{_t('timeline.frame')} {img.frame_index} 路 t={img.timestamp_sec:.1f}s", width=400)
+                            break
+
+                if s.evidence:
+                    with st.expander(_t("coach.evidence"), expanded=False):
+                        for lk in s.evidence:
+                            st.caption(f"{_t('timeline.frame')}={lk.frame_index or '?'} 路 t={lk.timestamp_sec:.1f}s 路 {lk.source}")
+
+# ===== JSON =====
+with t6:
+    st.subheader(_t("json.title"))
+    st.download_button(
+        _t("json.download_report"),
+        data=json.dumps(result, indent=2, ensure_ascii=False),
+        file_name=f"report_{result['overview']['video_id']}.json",
+        mime="application/json",
+    )
+    with st.expander(_t("json.preview"), expanded=False):
+        st.json(result)

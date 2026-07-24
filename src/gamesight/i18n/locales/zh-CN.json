@@ -1,0 +1,120 @@
+{
+  "lang_name": "简体中文",
+  "lang_code": "zh-CN",
+  "app": {
+    "title": "GameSight AI",
+    "subtitle": "CS2 POV 分析管线",
+    "version": "v0.1.0"
+  },
+  "sidebar": {
+    "input": "输入",
+    "demo_mode": "演示模式（合成数据）",
+    "demo_help": "使用合成 CS2 比赛数据，即时运行，无需视频。",
+    "upload_label": "上传 CS2 录像",
+    "upload_help": "选择 CS2 第一人称 POV 录像。推荐 16:9 (1920x1080)。",
+    "settings": "分析设置",
+    "sample_fps": "分析帧率",
+    "sample_fps_help": "每秒采样帧数。越低越快，越高越精细。",
+    "language": "语言"
+  },
+  "run": {
+    "button": "开始分析",
+    "reading_meta": "正在读取视频元数据...",
+    "processing": "正在处理帧 ({w}x{h}, {fps}fps)...",
+    "processing_frame": "正在处理第 {n} 帧...",
+    "detecting_events": "正在从 {n} 帧中检测事件...",
+    "building": "正在构建时间线和报告...",
+    "complete": "分析完成！",
+    "generating_demo": "正在生成演示事件...",
+    "aggregating": "正在聚合回合...",
+    "building_report": "正在构建报告..."
+  },
+  "tabs": {
+    "overview": "概览",
+    "timeline": "时间线",
+    "report": "报告",
+    "evidence": "证据",
+    "json": "JSON",
+    "coach": "AI 教练"
+  },
+  "overview": {
+    "match_overview": "比赛概览",
+    "video": "视频",
+    "rounds": "回合数",
+    "duration": "时长",
+    "kills": "击杀",
+    "deaths": "死亡",
+    "enemy_tracks": "敌方轨迹",
+    "resolution": "分辨率",
+    "fps_label": "帧率",
+    "round_summary": "回合摘要",
+    "round": "回合",
+    "killfeed": "击杀信息",
+    "first_enemy": "首次遇敌"
+  },
+  "timeline": {
+    "title": "事件时间线",
+    "no_findings": "此回合无发现。",
+    "evidence_links": "证据链接",
+    "truncated": "截断",
+    "confidence": "置信度",
+    "frame": "帧",
+    "source": "来源"
+  },
+  "report": {
+    "title": "证据报告",
+    "match_summary": "比赛摘要",
+    "duration_label": "时长",
+    "kills_label": "击杀",
+    "deaths_label": "死亡",
+    "enemy_tracks_label": "敌方轨迹",
+    "first_enemy_label": "首次遇敌时间"
+  },
+  "evidence": {
+    "title": "证据浏览器",
+    "no_links": "报告中无证据链接。",
+    "count": "全部 {n} 条证据链接",
+    "round_col": "回合",
+    "finding_col": "发现",
+    "category_col": "类别",
+    "frame_col": "帧",
+    "time_col": "时间",
+    "source_col": "来源"
+  },
+  "json": {
+    "title": "原始 JSON",
+    "download_report": "下载报告 JSON",
+    "download_timeline": "下载时间线 JSON",
+    "preview": "预览"
+  },
+  "coach": {
+    "title": "AI 教练",
+    "subtitle": "基于证据的教练建议",
+    "no_suggestions": "此比赛无可用的教练建议。",
+    "round_label": "回合",
+    "timestamp": "时间戳",
+    "category": "类别",
+    "reasoning": "分析",
+    "action": "建议行动",
+    "confidence": "置信度",
+    "evidence": "证据",
+    "categories": {
+      "aim": "瞄准",
+      "positioning": "站位",
+      "game_sense": "游戏意识",
+      "utility": "道具使用",
+      "economy": "经济",
+      "teamplay": "团队配合"
+    }
+  },
+  "how_it_works": {
+    "title": "工作原理",
+    "step1": "上传 CS2 第一人称录像 (.mp4, .mov, .mkv)",
+    "step2": "配置分析帧率（越低越快）",
+    "step3": "运行管线：HUD 解析、事件检测、报告生成",
+    "step4": "在不同标签页中查看结果"
+  },
+  "hint_upload": "上传 CS2 录像（或启用演示模式），然后点击开始分析。",
+  "nothing_here": "运行分析以查看结果。",
+  "loading": "加载中..."
+}
