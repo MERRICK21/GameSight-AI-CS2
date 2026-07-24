@@ -6,7 +6,7 @@ from unittest import TestCase
 
 import numpy as np
 
-from gamesight.domain.models import Detection, VideoInput, VideoMetadata
+from gamesight.domain.models import Detection, Track, VideoInput, VideoMetadata
 from gamesight.ingestion.video_reader import VideoFrame, VideoReader
 from gamesight.perception.detector import ObjectDetector
 from gamesight.orchestration.pipeline import VideoAnalysisPipeline
@@ -189,7 +189,7 @@ class VideoAnalysisPipelineTests(TestCase):
             _hp_frame(2, 0.2),
             _kill_feed_frame(3, 0.3),
             _money_frame(4, 0.4),
-            _blank_frame(5, 0.5),  # round end 鈥?all dark
+            _blank_frame(5, 0.5),  # round end 閳?all dark
         ]
         reader = _MockReader(metadata=self.metadata, frames=frames)
         pipeline = VideoAnalysisPipeline(reader, self.parser, sample_fps=10)
@@ -380,3 +380,67 @@ class VideoAnalysisPipelineDetectionTests(TestCase):
         # Detection output present
         self.assertIn("1 total detections", warnings_text)
         self.assertIn("detections.player: 1", warnings_text)
+
+
+# -- tracker integration tests ----------------------------------------------
+
+
+class _MockTracker:
+    """Returns fixed tracks."""
+    def __init__(self, tracks: list[Track] | None = None) -> None:
+        self._tracks = tracks or []
+        self.calls: list[int] = []  # detection counts per call
+
+    def update(self, detections):
+        self.calls.append(len(detections))
+        return self._tracks
+
+    def reset(self) -> None:
+        pass
+
+
+class VideoAnalysisPipelineTrackerTests(TestCase):
+    """End-to-end tests with IOUTracker wired in."""
+
+    def setUp(self) -> None:
+        self.video = VideoInput(video_id="test-trk", path=Path("test.mp4"))
+        self.metadata = VideoMetadata(
+            fps=60.0, width=1920, height=1080, duration_sec=10.0, codec="mock"
+        )
+        self.parser = CS2HudParser(CS2_STANDARD_16X9, {})
+
+    def test_no_tracker_still_works(self) -> None:
+        reader = _MockReader(metadata=self.metadata, frames=[_blank_frame(0, 0.0)])
+        pipeline = VideoAnalysisPipeline(reader, self.parser, tracker=None)
+        result = pipeline.run(self.video)
+        self.assertIn("[pipeline] 1 frames processed", result.warnings)
+
+    def test_tracker_called_per_frame(self) -> None:
+        tracker = _MockTracker()
+        detector = _MockDetector(detections=[
+            Detection(label="enemy", confidence=0.9, bbox_xyxy=(100, 200, 180, 400), frame_index=0, timestamp_sec=0.0),
+        ])
+        reader = _MockReader(metadata=self.metadata, frames=[
+            _blank_frame(0, 0.0), _blank_frame(1, 0.1),
+        ])
+        pipeline = VideoAnalysisPipeline(reader, self.parser, detector=detector, tracker=tracker)
+        pipeline.run(self.video)
+        self.assertEqual(len(tracker.calls), 2)
+
+    def test_tracks_reported_in_summary(self) -> None:
+        tracker = _MockTracker(tracks=[
+            Track(track_id="track_0000", label="enemy", detections=[
+                Detection(label="enemy", confidence=0.9, bbox_xyxy=(100, 200, 180, 400), frame_index=0, timestamp_sec=0.0),
+                Detection(label="enemy", confidence=0.85, bbox_xyxy=(102, 198, 182, 402), frame_index=1, timestamp_sec=0.1),
+            ]),
+        ])
+        detector = _MockDetector(detections=[])
+        reader = _MockReader(metadata=self.metadata, frames=[_blank_frame(0, 0.0)])
+        pipeline = VideoAnalysisPipeline(reader, self.parser, detector=detector, tracker=tracker)
+        result = pipeline.run(self.video)
+
+        warnings_text = "\n".join(result.warnings)
+        self.assertIn("1 unique tracks", warnings_text)
+        self.assertIn("tracks.track_0000", warnings_text)
+        self.assertIn("label=enemy", warnings_text)
+        self.assertIn("detections=2", warnings_text)

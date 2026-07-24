@@ -1,15 +1,16 @@
-"""Concrete analysis pipeline wiring ingestion through to HUD parsing and object detection."""
+"""Concrete analysis pipeline wiring ingestion through to HUD parsing, object detection, and tracking."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
-from gamesight.domain.models import AnalysisResult, Detection, HudState, VideoInput
+from gamesight.domain.models import AnalysisResult, Detection, HudState, Track, VideoInput
 from gamesight.ingestion.video_reader import VideoReader
 from gamesight.perception.classifier import PlayerClassifier
 from gamesight.perception.detector import ObjectDetector
 from gamesight.perception.hud_parser import HudParser
+from gamesight.tracking.tracker import MultiObjectTracker
 
 
 class AnalysisPipeline(ABC):
@@ -19,16 +20,11 @@ class AnalysisPipeline(ABC):
 
 
 class VideoAnalysisPipeline(AnalysisPipeline):
-    """End-to-end pipeline: ingest video, sample frames, parse HUD state,
-    and optionally run object detection with player classification.
+    """End-to-end pipeline: ingest, parse HUD, detect, classify, track.
 
-    Dependency injection via *reader*, *parser*, *detector*, and
-    *classifier* keeps the pipeline testable without real video files,
-    OpenCV, or YOLO.
-
-    Frame-level HUD states and detections are collected and reported as
-    a structured summary inside ``AnalysisResult.warnings`` until the
-    Event Engine can consume them to produce proper round/event output.
+    Dependency injection via *reader*, *parser*, *detector*,
+    *classifier*, and *tracker* keeps the pipeline testable without
+    real video files, OpenCV, or YOLO.
     """
 
     def __init__(
@@ -38,17 +34,20 @@ class VideoAnalysisPipeline(AnalysisPipeline):
         sample_fps: float = 10,
         detector: ObjectDetector | None = None,
         classifier: PlayerClassifier | None = None,
+        tracker: MultiObjectTracker | None = None,
     ) -> None:
         self._reader = reader
         self._parser = parser
         self._sample_fps = sample_fps
         self._detector = detector
         self._classifier = classifier
+        self._tracker = tracker
 
     def run(self, video: VideoInput) -> AnalysisResult:
         metadata = self._reader.inspect(video)
         hud_states: list[HudState] = []
         all_detections: list[Detection] = []
+        all_tracks: list[Track] = []
         warnings: list[str] = []
 
         try:
@@ -59,7 +58,7 @@ class VideoAnalysisPipeline(AnalysisPipeline):
                 )
                 hud_states.append(state)
 
-                # Object detection (optional)
+                # Object detection + classification
                 if self._detector is not None:
                     dets = self._detector.detect(
                         frame.image, frame.frame_index, frame.timestamp_sec
@@ -67,10 +66,15 @@ class VideoAnalysisPipeline(AnalysisPipeline):
                     if self._classifier is not None and dets:
                         dets = self._classifier.classify(frame.image, dets)
                     all_detections.extend(dets)
+
+                    # Tracking
+                    if self._tracker is not None:
+                        tracks = self._tracker.update(dets)
+                        all_tracks.extend(tracks)
         except Exception as exc:
             warnings.append(f"Frame processing error: {exc}")
 
-        summary = _build_summary(hud_states, all_detections)
+        summary = _build_summary(hud_states, all_detections, all_tracks)
         for line in summary:
             warnings.append(line)
 
@@ -85,36 +89,40 @@ class VideoAnalysisPipeline(AnalysisPipeline):
 def _build_summary(
     states: list[HudState],
     detections: Sequence[Detection] | None = None,
+    tracks: Sequence[Track] | None = None,
 ) -> list[str]:
-    """Build human-readable summary lines from collected HUD states and detections."""
+    """Build human-readable summary lines from HUD, detections, and tracks."""
     lines: list[str] = []
-
     total = len(states)
     lines.append(f"[pipeline] {total} frames processed")
 
     if detections is not None:
         total_dets = len(detections)
         lines.append(f"[pipeline] {total_dets} total detections across {total} frames")
-
-        # Per-label counts
         label_counts: dict[str, int] = {}
         for d in detections:
             label_counts[d.label] = label_counts.get(d.label, 0) + 1
         for label, count in sorted(label_counts.items()):
             lines.append(f"[pipeline] detections.{label}: {count}")
-
-        # Average confidence
         if total_dets > 0:
             avg_conf = sum(d.confidence for d in detections) / total_dets
             lines.append(f"[pipeline] detections.avg_confidence: {avg_conf:.2f}")
 
+    if tracks is not None:
+        # Deduplicate: tracker returns same tracks each frame; use final snapshot
+        unique_tracks: dict[str, Track] = {}
+        for t in tracks:
+            unique_tracks[t.track_id] = t
+        lines.append(f"[pipeline] {len(unique_tracks)} unique tracks")
+        for tid in sorted(unique_tracks.keys()):
+            t = unique_tracks[tid]
+            lines.append(f"[pipeline] tracks.{tid}: label={t.label} detections={len(t.detections)}")
+
     if not states:
         return lines
 
-    # HUD boolean flags
     flags: dict[str, int] = {}
     numeric: dict[str, list[float]] = {}
-
     for state in states:
         for key, val in state.values.items():
             if isinstance(val, bool):
