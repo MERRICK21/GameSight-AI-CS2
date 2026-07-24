@@ -1,1 +1,1 @@
-"""Future Streamlit presentation layer."""
+"""Streamlit presentation layer for GameSight AI — CS2."""
