@@ -2,84 +2,58 @@
 
 ## Current Status
 
-**Sprint 5 -- Tracking** (in progress)
-
----
-
-## Sprint Outline
-
-### Sprint 0 -- Project Initialization
-
-- Scaffold, dependencies, domain models, config
-
-### Sprint 1 -- Video Ingestion
-
-- Task 1: VideoReader, Task 2: FrameSampler, Task 3: Normalizer, Task 4: Validator + Reporter
-
-### Sprint 2 -- HUD Perception Layer
-
-- Task 1: HUD Layout Parser, Task 2: HUD State Extractor, Task 3: Pipeline Integration
-
-### Sprint 3 -- Event Engine
-
-- Task 1: RoundBoundaryDetector, Task 2: KillEventDetector, Task 3: Skipped, Task 4: EventAggregator
-
-### Sprint 4 -- Object Detection
-
-- Task 1: YOLODetector, Task 2: PlayerClassifier, Task 3: Pipeline Integration
-
-### Sprint 5 -- Tracking
-
-Multi-object tracking across frames.
-
-- Task 1: IOUTracker (IOU-based multi-object tracker)
-- Task 2: Track lifecycle (ID assignment, creation, termination, re-identification)
-- Task 3: Tracking pipeline integration
-
-### Sprint 6 -- Timeline JSON
-
-- Task 1: Timeline data model, Task 2: Timeline builder, Task 3: JSON export
-
-### Sprint 7 -- LLM Evidence-based Report
-
-- Task 1: Evidence formatter, Task 2: LLM report generator, Task 3: Report output
-
-### Sprint 8 -- Streamlit Demo
-
-- Task 1: Video upload + processing UI, Task 2: Timeline visualization, Task 3: Report display
+**Sprint 6 — Timeline JSON** (next)
 
 ---
 
 ## Completed
 
-### Sprint 0 -- Project Initialization
+### Sprint 0 — Project Initialization
+### Sprint 1 — Video Ingestion (53 tests)
+### Sprint 2 — HUD Perception Layer (83 tests)
 
-### Sprint 1 -- Video Ingestion (53 tests)
+### Sprint 3 — Event Engine (58 tests)
 
-### Sprint 2 -- HUD Perception Layer (83 tests)
+- RoundBoundaryDetector (state machine, debounce)
+- KillEventDetector (HP death, kill-feed kill)
+- EventAggregator (events → RoundAnalysis)
 
-### Sprint 3 -- Event Engine
+### Sprint 4 — Object Detection (39 tests)
 
-- Task 1: RoundBoundaryDetector (state machine, debounce) -- 26 tests
-- Task 2: KillEventDetector (HP death, kill-feed kill) -- 20 tests
-- Task 3: Skipped (bomb not in kill feed)
-- Task 4: EventAggregator (events -> RoundAnalysis) -- 12 tests
+- YOLODetector (model load + inference, DI)
+- PlayerClassifier (BGR colour enemy/teammate)
+- Pipeline integration
 
-**Sprint 3 total: 58 tests**
+### Sprint 5 — Tracking (22 + 19 tests)
 
-### Sprint 4 -- Object Detection
-
-- Task 1: YOLODetector (model load + inference, DI) -- 12 tests
-- Task 2: PlayerClassifier (BGR colour enemy/teammate) -- 11 tests
-- Task 3: Pipeline integration (detector + classifier in pipeline) -- 16 tests
-
-**Sprint 4 total: 39 tests**
-
-**Cumulative: 209 tests, all passing**
+- IOUTracker (IOU greedy matching, track lifecycle)
+- Pipeline integration
 
 ---
 
-## Notes
+## Cumulative: 234 tests, all passing
 
-- 1 pre-existing test failure in `test_validator.py::test_accepts_custom_extensions` (unrelated)
-- HUD coordinates / colour ranges calibrated against CS2 16:9 standard layout
+Pipeline architecture:
+
+```
+VideoInput → VideoReader → VideoFrame
+    ├── CS2HudParser → HudState (minimap, crosshair, HP, armour, kill feed, money, round info)
+    └── YOLODetector → PlayerClassifier (enemy/teammate) → Detection[]
+            └── IOUTracker → Track[] (ID, lifecycle)
+    ↓
+VideoAnalysisPipeline → AnalysisResult
+    ↓
+Event Engine (RoundBoundaryDetector + KillEventDetector) → GameEvent[]
+    ↓
+EventAggregator → RoundAnalysis[] (structured timeline)
+```
+
+## Next: Sprint 6 — Timeline JSON
+
+- Timeline data model serialisation
+- Timeline builder (events + tracks → sorted timeline)
+- JSON export + evidence linking
+
+## Sprint 7 — LLM Evidence-based Report
+
+## Sprint 8 — Streamlit Demo
