@@ -1,8 +1,8 @@
 # Project Status
 
-## Current Status
+## **Sprint 3 -- Event Engine** (complete)
 
-**Sprint 3 -- Event Engine** (in progress)
+**Next: Sprint 4 -- Object Detection**
 
 
 **Sprint 3 -- Event Engine** (in progress)
@@ -32,11 +32,19 @@
 
 - Task 1: Round Boundary Detector (state machine, debounce, min duration) -- 26 tests
 - Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
+- Task 3: Skipped (bomb events not in kill feed)
+- Task 4: Event Aggregator (groups events into RoundAnalysis timeline) -- 12 tests
+
+**Sprint 3 total: 58 tests, all passing**
 
 Convert HudState sequences into structured GameEvent objects.
 
 - Task 1: Round Boundary Detector (round_start / round_end from state transitions + debouncing)
-- Task 2: Kill Event Detector (kill / death from kill-feed activity changes)
+- Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
+- Task 3: Skipped (bomb events not in kill feed)
+- Task 4: Event Aggregator (groups events into RoundAnalysis timeline) -- 12 tests
+
+**Sprint 3 total: 58 tests, all passing**
 - Task 3: Bomb Event Detector (bomb_planted / bomb_defused)
 - Task 4: Event Aggregator (merge into RoundAnalysis, produce timeline)
 
@@ -110,6 +118,10 @@ Interactive web demo for the full pipeline.
 
 - Task 1: Round Boundary Detector (state machine, debounce, min duration) -- 26 tests
 - Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
+- Task 3: Skipped (bomb events not in kill feed)
+- Task 4: Event Aggregator (groups events into RoundAnalysis timeline) -- 12 tests
+
+**Sprint 3 total: 58 tests, all passing**
 
 - Task 1: Round Boundary Detector
   - `RoundBoundaryDetector` implements `EventEngine` ABC
