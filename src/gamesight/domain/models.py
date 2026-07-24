@@ -8,6 +8,59 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 
+class HudRegion(BaseModel):
+    """A named, resolution-independent HUD region on screen.
+
+    All coordinates are fractions of screen dimensions (0.0–1.0),
+    making profiles reusable across any resolution sharing the same
+    aspect ratio.
+    """
+
+    name: str
+    anchor: str = Field(
+        description="One of: top_left, top_center, top_right, center, bottom_left, bottom_center, bottom_right"
+    )
+    x_norm: float = Field(ge=0.0, le=1.0, description="Left edge as fraction of screen width")
+    y_norm: float = Field(ge=0.0, le=1.0, description="Top edge as fraction of screen height")
+    w_norm: float = Field(ge=0.0, le=1.0, description="Width as fraction of screen width")
+    h_norm: float = Field(ge=0.0, le=1.0, description="Height as fraction of screen height")
+    description: str = ""
+
+    def to_pixel(self, screen_w: int, screen_h: int) -> tuple[int, int, int, int]:
+        """Convert normalized coordinates to pixel bounding box (x, y, w, h)."""
+        return (
+            int(self.x_norm * screen_w),
+            int(self.y_norm * screen_h),
+            max(1, int(self.w_norm * screen_w)),
+            max(1, int(self.h_norm * screen_h)),
+        )
+
+
+class HudLayoutProfile(BaseModel):
+    """Complete screen layout describing where every HUD element lives.
+
+    Profiles are resolution-independent; pixel coordinates are derived
+    at runtime via ``HudRegion.to_pixel()``.
+    """
+
+    name: str
+    game: str
+    aspect_ratio: str
+    regions: list[HudRegion] = Field(default_factory=list)
+
+    def region(self, name: str) -> HudRegion | None:
+        """Look up a region by name; returns None when not found."""
+        for r in self.regions:
+            if r.name == name:
+                return r
+        return None
+
+    @property
+    def region_names(self) -> list[str]:
+        """Convenience accessor for all region names."""
+        return [r.name for r in self.regions]
+
+
 class EventType(StrEnum):
     ROUND_START = "round_start"
     ROUND_END = "round_end"
