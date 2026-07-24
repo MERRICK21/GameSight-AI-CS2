@@ -42,18 +42,28 @@
   - CS2 standard 16:9 built-in profile (7 HUD regions)
   - `HudProfileRegistry` with pre-loaded defaults
   - 31 tests, all passing
+- Sprint 2 Task 2 — `HUD State Extractor`
+  - `RegionExtractor` ABC (per-region extraction contract)
+  - `CrosshairExtractor` (intensity-variance-based crosshair detection)
+  - `HPBarExtractor` (colour-threshold HP estimate, armour detection)
+  - `KillFeedExtractor` (bright-pixel activity detection)
+  - `MoneyExtractor` (text visibility detection)
+  - `RoundInfoExtractor` (round-active / timer-visible detection)
+  - `CS2HudParser` implements `HudParser` ABC, delegates to region extractors
+  - 42 tests, all passing (29 extractor + 13 parser)
 
 ---
 
 ## Next
 
-**Sprint 2 Task 2** — HUD State Extractor
+**Sprint 2 Task 3** — End-to-end pipeline integration
 
-Build on `HudLayoutProfile` to extract actual HUD values from frames using region coordinates. Parse HP, ammo, money, round timer, kill-feed events from the defined regions.
+Connect `VideoReader` → `FrameSampler` → `CS2HudParser` in the orchestration layer.
+Run a real CS2 video through the pipeline and validate HUD state output.
 
 ---
 
 ## Notes
 
 - 1 pre-existing test failure in `test_validator.py::test_accepts_custom_extensions` (unrelated to current sprint)
-- HUD coordinates are calibrated against standard CS2 16:9 layout; may need fine-tuning with real screenshots
+- HUD coordinates and colour ranges are calibrated against standard CS2 16:9 layout; may need fine-tuning with real screenshots
