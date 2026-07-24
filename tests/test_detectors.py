@@ -3,7 +3,7 @@
 from unittest import TestCase
 
 from gamesight.domain.models import EventType, HudState
-from gamesight.events.detectors import RoundBoundaryDetector
+from gamesight.events.detectors import KillEventDetector, RoundBoundaryDetector
 from gamesight.events.engine import EventEngine
 
 
@@ -348,3 +348,300 @@ class RoundBoundaryDetectorEvidenceTests(TestCase):
         events += detector.update(_state(0, 0.0, True))
         events += detector.update(_state(1, 0.5, True))
         self.assertGreaterEqual(events[0].confidence, 0.8)
+
+# -- KillEventDetector -------------------------------------------------------
+
+def _hud_state(
+    fi: int, ts: float,
+    hp: int | None = 100,
+    kill_feed: bool = False,
+) -> HudState:
+    """Factory for a HudState with HP and kill-feed values."""
+    return HudState(
+        frame_index=fi,
+        timestamp_sec=ts,
+        profile="cs2_standard_16x9",
+        values={
+            "player_status.hp": hp,
+            "kill_feed.kill_feed_active": kill_feed,
+        },
+        confidence=0.8,
+    )
+
+
+class KillEventDetectorInterfaceTests(TestCase):
+    """Contract and constructor tests."""
+
+    def test_implements_event_engine(self) -> None:
+        detector = KillEventDetector()
+        self.assertIsInstance(detector, EventEngine)
+
+    def test_default_constructor_values(self) -> None:
+        detector = KillEventDetector()
+        self.assertEqual(detector._hp_key, "player_status.hp")
+        self.assertEqual(detector._kf_key, "kill_feed.kill_feed_active")
+        self.assertEqual(detector._hp_death_threshold, 20)
+        self.assertEqual(detector._death_debounce, 4)
+        self.assertEqual(detector._kill_debounce, 2)
+
+    def test_raises_on_invalid_death_debounce(self) -> None:
+        with self.assertRaises(ValueError):
+            KillEventDetector(death_debounce_frames=0)
+
+    def test_raises_on_invalid_kill_debounce(self) -> None:
+        with self.assertRaises(ValueError):
+            KillEventDetector(kill_debounce_frames=0)
+
+    def test_finalize_returns_empty(self) -> None:
+        detector = KillEventDetector()
+        self.assertEqual(len(detector.finalize()), 0)
+
+
+class KillEventDetectorDeathTests(TestCase):
+    """Tests for PLAYER_DEATH detection."""
+
+    def test_sustained_low_hp_emits_death(self) -> None:
+        detector = KillEventDetector(
+            death_debounce_frames=3,
+            death_cooldown_sec=0,
+        )
+        events: list = []
+
+        # Player alive at high HP
+        for i in range(3):
+            events += detector.update(_hud_state(i, i * 0.5, hp=100))
+
+        # HP drops below threshold 鈥?need 3 consecutive frames
+        events += detector.update(_hud_state(3, 1.5, hp=10))
+        events += detector.update(_hud_state(4, 2.0, hp=5))
+        self.assertEqual(len(events), 0, "2 low-HP frames insufficient for debounce=3")
+
+        events += detector.update(_hud_state(5, 2.5, hp=3))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, EventType.PLAYER_DEATH)
+
+    def test_hp_at_threshold_does_not_trigger(self) -> None:
+        detector = KillEventDetector(
+            hp_death_threshold=20, death_debounce_frames=1, death_cooldown_sec=0,
+        )
+        events: list = []
+        events += detector.update(_hud_state(0, 0.0, hp=20))  # exactly at threshold
+        self.assertEqual(len(events), 0, "HP at threshold should not trigger death")
+
+    def test_hp_below_threshold_triggers(self) -> None:
+        detector = KillEventDetector(
+            hp_death_threshold=20, death_debounce_frames=1, death_cooldown_sec=0,
+        )
+        events = list(detector.update(_hud_state(0, 0.0, hp=19)))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, EventType.PLAYER_DEATH)
+
+    def test_hp_recovery_resets_debounce(self) -> None:
+        detector = KillEventDetector(
+            death_debounce_frames=4, death_cooldown_sec=0,
+        )
+        events: list = []
+
+        events += detector.update(_hud_state(0, 0.0, hp=10))
+        events += detector.update(_hud_state(1, 0.5, hp=8))
+        # Recovery 鈥?HP goes back up
+        events += detector.update(_hud_state(2, 1.0, hp=80))
+        self.assertEqual(len(events), 0)
+
+        # HP drops again 鈥?debounce should restart
+        events += detector.update(_hud_state(3, 1.5, hp=5))
+        events += detector.update(_hud_state(4, 2.0, hp=3))
+        events += detector.update(_hud_state(5, 2.5, hp=2))
+        events += detector.update(_hud_state(6, 3.0, hp=1))
+        self.assertEqual(len(events), 1, "Debounce should restart after recovery")
+
+    def test_death_cooldown_prevents_duplicates(self) -> None:
+        detector = KillEventDetector(
+            death_debounce_frames=1,
+            death_cooldown_sec=5.0,
+        )
+        events: list = []
+
+        # First death
+        events += detector.update(_hud_state(0, 0.0, hp=10))
+        self.assertEqual(len(events), 1)
+
+        # Immediately low HP again 鈥?cooldown suppresses
+        events += detector.update(_hud_state(1, 0.5, hp=5))
+        self.assertEqual(len(events), 1)
+
+        # After cooldown 鈥?new death possible
+        events += detector.update(_hud_state(20, 5.5, hp=3))
+        self.assertEqual(len(events), 2)
+
+    def test_missing_hp_key_does_not_crash(self) -> None:
+        detector = KillEventDetector(death_debounce_frames=1, death_cooldown_sec=0)
+        state = HudState(
+            frame_index=0, timestamp_sec=0.0,
+            profile="cs2", values={}, confidence=0.5,
+        )
+        events = list(detector.update(state))
+        self.assertEqual(len(events), 0)
+
+    def test_death_event_has_correct_metadata(self) -> None:
+        detector = KillEventDetector(
+            death_debounce_frames=1, death_cooldown_sec=0,
+        )
+        events = list(detector.update(_hud_state(5, 3.0, hp=5)))
+        self.assertEqual(len(events), 1)
+        e = events[0]
+        self.assertEqual(e.event_id, "player_death_001")
+        self.assertGreaterEqual(e.confidence, 0.8)
+        self.assertEqual(e.attributes["death_index"], 1)
+        self.assertGreater(len(e.evidence), 0)
+
+
+class KillEventDetectorKillTests(TestCase):
+    """Tests for PLAYER_KILL detection via kill-feed rising edges."""
+
+    def test_rising_edge_emits_kill(self) -> None:
+        detector = KillEventDetector(
+            kill_debounce_frames=2, kill_cooldown_sec=0,
+        )
+        events: list = []
+
+        # Kill feed inactive
+        events += detector.update(_hud_state(0, 0.0, kill_feed=False))
+        events += detector.update(_hud_state(1, 0.5, kill_feed=False))
+
+        # Rising edge 鈥?need 2 frames
+        events += detector.update(_hud_state(2, 1.0, kill_feed=True))
+        self.assertEqual(len(events), 0, "1 frame of rising edge insufficient")
+        events += detector.update(_hud_state(3, 1.5, kill_feed=True))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_type, EventType.PLAYER_KILL)
+
+    def test_kill_feed_staying_active_no_extra_events(self) -> None:
+        detector = KillEventDetector(
+            kill_debounce_frames=1, kill_cooldown_sec=0,
+        )
+        events: list = []
+
+        # First rising edge 鈫?kill
+        events += detector.update(_hud_state(0, 0.0, kill_feed=True))
+        self.assertEqual(len(events), 1)
+
+        # Staying active 鈥?no new events
+        for i in range(1, 10):
+            events += detector.update(_hud_state(i, i * 0.5, kill_feed=True))
+        kill_count = sum(1 for e in events if e.event_type == EventType.PLAYER_KILL)
+        self.assertEqual(kill_count, 1)
+
+    def test_kill_cooldown_prevents_duplicates(self) -> None:
+        detector = KillEventDetector(
+            kill_debounce_frames=1,
+            kill_cooldown_sec=3.0,
+        )
+        events: list = []
+
+        # First kill
+        events += detector.update(_hud_state(0, 0.0, kill_feed=True))
+        self.assertEqual(len(events), 1)
+
+        # Feed goes inactive, then active again within cooldown
+        events += detector.update(_hud_state(1, 0.5, kill_feed=False))
+        events += detector.update(_hud_state(2, 1.0, kill_feed=True))
+        self.assertEqual(len(events), 1, "Cooldown should suppress rapid re-trigger")
+
+        # After cooldown
+        events += detector.update(_hud_state(10, 3.5, kill_feed=False))
+        events += detector.update(_hud_state(11, 4.0, kill_feed=True))
+        self.assertEqual(len(events), 2)
+
+    def test_kill_event_has_metadata(self) -> None:
+        detector = KillEventDetector(
+            kill_debounce_frames=1, kill_cooldown_sec=0,
+        )
+        events = list(detector.update(_hud_state(0, 0.0, kill_feed=True)))
+        e = events[0]
+        self.assertEqual(e.event_id, "player_kill_001")
+        self.assertEqual(e.event_type, EventType.PLAYER_KILL)
+        self.assertLess(e.confidence, 0.8,
+                        msg="Kill confidence should be lower than death (colour-only heuristic)")
+        self.assertEqual(e.attributes["kill_index"], 1)
+
+    def test_multiple_kills_across_round(self) -> None:
+        detector = KillEventDetector(
+            kill_debounce_frames=1, kill_cooldown_sec=1.0,
+        )
+        events: list = []
+
+        # Kill 1
+        events += detector.update(_hud_state(0, 0.0, kill_feed=True))
+        events += detector.update(_hud_state(1, 0.5, kill_feed=False))
+
+        # Wait for cooldown
+        events += detector.update(_hud_state(5, 1.5, kill_feed=False))
+
+        # Kill 2
+        events += detector.update(_hud_state(6, 2.0, kill_feed=True))
+        events += detector.update(_hud_state(7, 2.5, kill_feed=False))
+
+        # Wait for cooldown
+        events += detector.update(_hud_state(12, 3.5, kill_feed=False))
+
+        # Kill 3
+        events += detector.update(_hud_state(13, 4.0, kill_feed=True))
+
+        kills = [e for e in events if e.event_type == EventType.PLAYER_KILL]
+        self.assertEqual(len(kills), 3)
+        self.assertEqual(kills[0].event_id, "player_kill_001")
+        self.assertEqual(kills[1].event_id, "player_kill_002")
+        self.assertEqual(kills[2].event_id, "player_kill_003")
+
+
+class KillEventDetectorCombinedTests(TestCase):
+    """Tests where both death and kill signals fire together."""
+
+    def test_death_and_kill_in_same_frame(self) -> None:
+        detector = KillEventDetector(
+            death_debounce_frames=1, death_cooldown_sec=0,
+            kill_debounce_frames=1, kill_cooldown_sec=0,
+        )
+        # Both HP low and kill feed active
+        state = HudState(
+            frame_index=0, timestamp_sec=0.0,
+            profile="cs2", values={
+                "player_status.hp": 5,
+                "kill_feed.kill_feed_active": True,
+            }, confidence=0.8,
+        )
+        events = list(detector.update(state))
+        types = {e.event_type for e in events}
+        self.assertIn(EventType.PLAYER_DEATH, types)
+        self.assertIn(EventType.PLAYER_KILL, types)
+
+    def test_death_cooldown_does_not_block_kills(self) -> None:
+        """Death cooldown should only affect death events, not kills."""
+        detector = KillEventDetector(
+            death_debounce_frames=1, death_cooldown_sec=10.0,
+            kill_debounce_frames=1, kill_cooldown_sec=0,
+        )
+        events: list = []
+
+        # Death at t=0
+        events += detector.update(_hud_state(0, 0.0, hp=3))
+
+        # Kill feed activates during death cooldown 鈥?should still emit
+        events += detector.update(_hud_state(1, 0.5, kill_feed=True))
+
+        types_after = {e.event_type for e in events}
+        self.assertIn(EventType.PLAYER_KILL, types_after)
+
+    def test_finalize_resets_counters(self) -> None:
+        detector = KillEventDetector(
+            death_debounce_frames=1, death_cooldown_sec=0,
+            kill_debounce_frames=1, kill_cooldown_sec=0,
+        )
+        detector.update(_hud_state(0, 0.0, hp=5))
+        detector.update(_hud_state(1, 0.5, kill_feed=True))
+        detector.finalize()
+
+        # Reuse 鈥?counters should start fresh
+        self.assertEqual(detector._death_counter, 0)
+        self.assertEqual(detector._kill_counter, 0)

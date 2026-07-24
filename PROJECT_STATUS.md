@@ -4,6 +4,9 @@
 
 **Sprint 3 -- Event Engine** (in progress)
 
+
+**Sprint 3 -- Event Engine** (in progress)
+
 ---
 
 ## Sprint Outline
@@ -26,6 +29,9 @@
 - Task 3: Pipeline Integration (VideoAnalysisPipeline, end-to-end wiring)
 
 ### Sprint 3 -- Event Engine
+
+- Task 1: Round Boundary Detector (state machine, debounce, min duration) -- 26 tests
+- Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
 
 Convert HudState sequences into structured GameEvent objects.
 
@@ -101,6 +107,9 @@ Interactive web demo for the full pipeline.
 **Sprint 2 total: 83 tests, all passing**
 
 ### Sprint 3 -- Event Engine
+
+- Task 1: Round Boundary Detector (state machine, debounce, min duration) -- 26 tests
+- Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
 
 - Task 1: Round Boundary Detector
   - `RoundBoundaryDetector` implements `EventEngine` ABC
