@@ -1,11 +1,8 @@
 # Project Status
 
-## **Sprint 3 -- Event Engine** (complete)
+## Current Status
 
-**Next: Sprint 4 -- Object Detection**
-
-
-**Sprint 3 -- Event Engine** (in progress)
+**Sprint 5 -- Tracking** (in progress)
 
 ---
 
@@ -17,76 +14,39 @@
 
 ### Sprint 1 -- Video Ingestion
 
-- Task 1: VideoReader (OpenCVVideoReader)
-- Task 2: FrameSampler
-- Task 3: Normalizer (VideoPreprocessor)
-- Task 4: Validator + Reporter
+- Task 1: VideoReader, Task 2: FrameSampler, Task 3: Normalizer, Task 4: Validator + Reporter
 
 ### Sprint 2 -- HUD Perception Layer
 
-- Task 1: HUD Layout Parser (HudRegion, HudLayoutProfile, CS2 profile, Registry)
-- Task 2: HUD State Extractor (RegionExtractor ABC, 5 extractors, CS2HudParser)
-- Task 3: Pipeline Integration (VideoAnalysisPipeline, end-to-end wiring)
+- Task 1: HUD Layout Parser, Task 2: HUD State Extractor, Task 3: Pipeline Integration
 
 ### Sprint 3 -- Event Engine
 
-- Task 1: Round Boundary Detector (state machine, debounce, min duration) -- 26 tests
-- Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
-- Task 3: Skipped (bomb events not in kill feed)
-- Task 4: Event Aggregator (groups events into RoundAnalysis timeline) -- 12 tests
-
-**Sprint 3 total: 58 tests, all passing**
-
-Convert HudState sequences into structured GameEvent objects.
-
-- Task 1: Round Boundary Detector (round_start / round_end from state transitions + debouncing)
-- Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
-- Task 3: Skipped (bomb events not in kill feed)
-- Task 4: Event Aggregator (groups events into RoundAnalysis timeline) -- 12 tests
-
-**Sprint 3 total: 58 tests, all passing**
-- Task 3: Bomb Event Detector (bomb_planted / bomb_defused)
-- Task 4: Event Aggregator (merge into RoundAnalysis, produce timeline)
+- Task 1: RoundBoundaryDetector, Task 2: KillEventDetector, Task 3: Skipped, Task 4: EventAggregator
 
 ### Sprint 4 -- Object Detection
 
-YOLO-based player detection on frame crops.
-
-- Task 1: YOLO model integration (load + inference)
-- Task 2: Player detector (enemy / teammate classification)
-- Task 3: Detection pipeline integration with frame sampling
+- Task 1: YOLODetector, Task 2: PlayerClassifier, Task 3: Pipeline Integration
 
 ### Sprint 5 -- Tracking
 
 Multi-object tracking across frames.
 
-- Task 1: ByteTrack / SORT integration
-- Task 2: Track ID assignment + cross-frame association
+- Task 1: IOUTracker (IOU-based multi-object tracker)
+- Task 2: Track lifecycle (ID assignment, creation, termination, re-identification)
 - Task 3: Tracking pipeline integration
 
 ### Sprint 6 -- Timeline JSON
 
-Merge events + tracks into structured, serialisable timeline.
-
-- Task 1: Timeline data model
-- Task 2: Timeline builder (events + tracks -> sorted timeline)
-- Task 3: JSON export + evidence linking
+- Task 1: Timeline data model, Task 2: Timeline builder, Task 3: JSON export
 
 ### Sprint 7 -- LLM Evidence-based Report
 
-Feed structured timeline to LLM for natural-language analysis.
-
-- Task 1: Evidence formatter (structured data -> LLM prompt)
-- Task 2: LLM report generator (OpenAI API)
-- Task 3: Report output (structured text + stats)
+- Task 1: Evidence formatter, Task 2: LLM report generator, Task 3: Report output
 
 ### Sprint 8 -- Streamlit Demo
 
-Interactive web demo for the full pipeline.
-
-- Task 1: Video upload + processing UI
-- Task 2: Timeline visualization
-- Task 3: Report display
+- Task 1: Video upload + processing UI, Task 2: Timeline visualization, Task 3: Report display
 
 ---
 
@@ -94,52 +54,28 @@ Interactive web demo for the full pipeline.
 
 ### Sprint 0 -- Project Initialization
 
-- Project scaffold (`src/gamesight/`)
-- `pyproject.toml`, `README.md`, `requirements.txt`
-- Domain models, config skeleton
-- GitHub repo established
+### Sprint 1 -- Video Ingestion (53 tests)
 
-### Sprint 1 -- Video Ingestion
-
-- Task 1: VideoReader (metadata, error handling, DI)
-- Task 2: FrameSampler (arbitrary FPS, seek, edge cases) -- 13 tests
-- Task 3: Normalizer (resolution / aspect / FPS quality) -- 12 tests
-- Task 4: Validator + Reporter (file validation, ingestion report) -- 28 tests
-
-### Sprint 2 -- HUD Perception Layer
-
-- Task 1: HUD Layout Parser (HudRegion, HudLayoutProfile, CS2 16:9, Registry) -- 31 tests
-- Task 2: HUD State Extractor (5 extractors, CS2HudParser) -- 42 tests
-- Task 3: Pipeline Integration (VideoAnalysisPipeline) -- 10 tests
-
-**Sprint 2 total: 83 tests, all passing**
+### Sprint 2 -- HUD Perception Layer (83 tests)
 
 ### Sprint 3 -- Event Engine
 
-- Task 1: Round Boundary Detector (state machine, debounce, min duration) -- 26 tests
-- Task 2: Kill Event Detector (HP-drop death, kill-feed-edge kill) -- 20 tests
-- Task 3: Skipped (bomb events not in kill feed)
-- Task 4: Event Aggregator (groups events into RoundAnalysis timeline) -- 12 tests
+- Task 1: RoundBoundaryDetector (state machine, debounce) -- 26 tests
+- Task 2: KillEventDetector (HP death, kill-feed kill) -- 20 tests
+- Task 3: Skipped (bomb not in kill feed)
+- Task 4: EventAggregator (events -> RoundAnalysis) -- 12 tests
 
-**Sprint 3 total: 58 tests, all passing**
+**Sprint 3 total: 58 tests**
 
-- Task 1: Round Boundary Detector
-  - `RoundBoundaryDetector` implements `EventEngine` ABC
-  - State machine: idle -> candidate_start -> in_round -> candidate_end -> idle
-  - Configurable debounce window (flicker suppression)
-  - Minimum round duration enforcement
-  - `finalize()` support for mid-video truncation
-  - Evidence-tagged GameEvent output
-  - 26 tests, all passing
+### Sprint 4 -- Object Detection
 
----
+- Task 1: YOLODetector (model load + inference, DI) -- 12 tests
+- Task 2: PlayerClassifier (BGR colour enemy/teammate) -- 11 tests
+- Task 3: Pipeline integration (detector + classifier in pipeline) -- 16 tests
 
-## Next
+**Sprint 4 total: 39 tests**
 
-**Sprint 3 Task 2** -- Kill Event Detector
-
-Detect PLAYER_KILL / PLAYER_DEATH events from kill-feed activity transitions
-and HUD state changes.
+**Cumulative: 209 tests, all passing**
 
 ---
 
