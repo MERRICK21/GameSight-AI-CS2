@@ -57,7 +57,7 @@ class YOLODetector(ObjectDetector):
         if model is not None:
             self._model = model
         else:
-            self._model = self._load_model(model_path or self._DEFAULT_MODEL)
+            self._model = self._load_model(model_path or self._DEFAULT_MODEL, device='cuda')
 
     def detect(
         self, frame: object, frame_index: int, timestamp_sec: float
@@ -98,7 +98,7 @@ class YOLODetector(ObjectDetector):
     # -- internal ------------------------------------------------------------
 
     @staticmethod
-    def _load_model(path: str) -> object:
+    def _load_model(path: str, device: str = 'cuda') -> object:
         """Import ultralytics lazily so the module is importable without it."""
         try:
             from ultralytics import YOLO
@@ -106,4 +106,4 @@ class YOLODetector(ObjectDetector):
             raise ImportError(
                 "ultralytics is not installed.  Install it with: pip install ultralytics"
             ) from exc
-        return YOLO(path)
+        return YOLO(path, task='detect').to(device)

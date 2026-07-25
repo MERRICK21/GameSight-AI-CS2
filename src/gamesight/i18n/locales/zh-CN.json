@@ -19,7 +19,12 @@
     "player_filter": "按玩家筛选",
     "player_filter_help": "只分析你的视角画面。跳过死亡后的观战画面。",
     "player_name": "玩家名称",
-    "player_name_help": "你的游戏内名称（未来将支持 OCR 匹配）。当前跳过死亡后的观战帧。"
+    "player_name_help": "你的游戏内名称（未来将支持 OCR 匹配）。当前跳过死亡后的观战帧。",
+    "ocr_label": "OCR 回合检测",
+    "ocr_help": "通过颜色检测读取比分。比计时器检测更稳定。",
+    "yolo_label": "YOLO 玩家检测",
+    "yolo_help": "检测并分类玩家。需要 GPU + pip install ultralytics torch",
+    "ai_features": "AI 功能"
   },
   "run": {
     "button": "开始分析",
@@ -54,7 +59,8 @@
     "round_summary": "回合摘要",
     "round": "回合",
     "killfeed": "击杀信息",
-    "first_enemy": "首次遇敌"
+    "first_enemy": "首次遇敌",
+    "player_died": "是否阵亡"
   },
   "timeline": {
     "title": "事件时间线",
@@ -195,5 +201,11 @@
     "tip_default": "未检测到特定威胁 -- 保持地图意识，关注小地图。",
     "round_active": "回合进行中",
     "round_inactive": "回合未激活（冻结时间或已结束）"
-  }
+  },
+  "summary_title": "赛后总结",
+  "strengths": "优势",
+  "weaknesses": "短板",
+  "focus_areas": "重点方向",
+  "practice_drills": "训练建议",
+  "assessment": "总评"
 }

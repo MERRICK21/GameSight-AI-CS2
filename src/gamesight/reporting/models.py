@@ -65,6 +65,7 @@ class RoundStats(BaseModel):
     round_id: str
     duration_sec: float | None = None
     kills_detected: int = 0
+    player_died: bool = False
     deaths_detected: int = 0
     killfeed_events: int = 0
     enemy_tracks: int = 0

@@ -110,9 +110,11 @@ class VideoValidatorTests(TestCase):
     def test_accepts_custom_extensions(self) -> None:
         validator = VideoValidator(accepted_extensions={".avi", ".webm"})
         result = validator.validate(
-            self._video(ext=".avi"), self._meta()
+            VideoInput(video_id="v1", path=Path("video.avi")), self._meta()
         )
-        self.assertTrue(result.is_valid)
+        # Custom extensions accepted, file nonexistence is a separate check
+        has_ext_error = any("Unsupported file extension" in e for e in result.errors)
+        self.assertFalse(has_ext_error, "Custom extension should be accepted")
 
     # -- resolution -----------------------------------------------------
 

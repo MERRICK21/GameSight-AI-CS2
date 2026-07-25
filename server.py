@@ -493,7 +493,13 @@ class GameSightHandler(SimpleHTTPRequestHandler):
         metadata = reader.inspect(video)
 
         # HUD parsing
-        parser = CS2HudParser(CS2_STANDARD_16X9, {`n            "crosshair": CrosshairExtractor(),`n            "player_status": HPBarExtractor(),`n            "kill_feed": KillFeedExtractor(),`n            "money": MoneyExtractor(),`n            "round_info": RoundInfoExtractor(),`n        })
+        parser = CS2HudParser(CS2_STANDARD_16X9, {
+            "crosshair": CrosshairExtractor(),
+            "player_status": HPBarExtractor(),
+            "kill_feed": KillFeedExtractor(),
+            "money": MoneyExtractor(),
+            "round_info": RoundInfoExtractor(),
+        })
 
         hud_states = []
         for frame in reader.frames(video, sample_fps):

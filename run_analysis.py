@@ -70,15 +70,13 @@ def main() -> None:
 
     # ---- Step 2: Frame processing ----
     print(f"Processing frames at {args.sample_fps} fps...")
-    parser_hud = CS2HudParser(
-        extractors=[
-            CrosshairExtractor(),
-            HPBarExtractor(),
-            KillFeedExtractor(),
-            MoneyExtractor(),
-            RoundInfoExtractor(),
-        ],
-    )
+    parser_hud = CS2HudParser(CS2_STANDARD_16X9, {
+        "crosshair": CrosshairExtractor(),
+        "player_status": HPBarExtractor(),
+        "kill_feed": KillFeedExtractor(),
+        "money": MoneyExtractor(),
+        "round_info": RoundInfoExtractor(),
+    })
 
     hud_states = []
     frame_count = 0

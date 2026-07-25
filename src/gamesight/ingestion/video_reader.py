@@ -53,7 +53,7 @@ class OpenCVVideoReader(VideoReader):
     def __init__(self, cv2_module: object | None = None) -> None:
         self._cv2 = cv2_module if cv2_module is not None else import_module("cv2")
 
-    # ── metadata inspection ────────────────────────────────────────────
+    # -- metadata inspection --------------------------------------------------------
 
     def inspect(self, video: VideoInput) -> VideoMetadata:
         """Return metadata reported by OpenCV for ``video``.
@@ -84,14 +84,14 @@ class OpenCVVideoReader(VideoReader):
         finally:
             capture.release()
 
-    # ── frame sampling ─────────────────────────────────────────────────
+    # -- frame sampling ------------------------------------------------------------
 
     def frames(self, video: VideoInput, sample_fps: float) -> Iterator[VideoFrame]:
         """Yield decoded frames at a uniform rate close to ``sample_fps``.
 
-        The method computes a step interval from the video's container FPS
-        and uses ``CAP_PROP_POS_FRAMES`` to jump to each sample position
-        without decoding intermediate frames.
+        Uses sequential reading with ``grab()`` for skipping to avoid the
+        slow ``CAP_PROP_POS_FRAMES`` seek, which is unreliable with
+        inter-frame compressed codecs (h264/h265).
 
         Raises ``FrameSamplingError`` when the video does not report a valid
         native FPS, making uniform sampling impossible.
@@ -118,29 +118,37 @@ class OpenCVVideoReader(VideoReader):
                 capture.get(self._cv2.CAP_PROP_FRAME_COUNT)
             )
             if total_frames is None or total_frames == 0:
-                return  # empty video — yield nothing
+                return  # empty video -- yield nothing
 
             # Step in native frame units.  Clamp to at least 1 so we never
             # get stuck re-reading the same frame when sample_fps > native_fps.
             step = max(1, round(native_fps / sample_fps))
 
-            frame_index = 0
-            while frame_index < total_frames:
-                capture.set(self._cv2.CAP_PROP_POS_FRAMES, frame_index)
-                success, image = capture.read()
-                if not success:
-                    break
-
-                yield VideoFrame(
-                    frame_index=frame_index,
-                    timestamp_sec=frame_index / native_fps,
-                    image=image,
-                )
-                frame_index += step
+            # Sequential read with frame skipping: grab() only parses frame
+            # headers without full decode, much faster than seek+read for
+            # compressed codecs.
+            target_frame = 0
+            current_frame = 0
+            while current_frame < total_frames:
+                if current_frame == target_frame:
+                    success, image = capture.read()
+                    if not success:
+                        break
+                    yield VideoFrame(
+                        frame_index=current_frame,
+                        timestamp_sec=current_frame / native_fps,
+                        image=image,
+                    )
+                    target_frame += step
+                    current_frame += 1
+                else:
+                    # Skip frame without full decode
+                    capture.grab()
+                    current_frame += 1
         finally:
             capture.release()
 
-    # ── helpers ────────────────────────────────────────────────────────
+    # -- helpers -------------------------------------------------------------------
 
     @staticmethod
     def _positive_float(value: float) -> float | None:

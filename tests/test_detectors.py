@@ -48,8 +48,8 @@ class RoundBoundaryDetectorInterfaceTests(TestCase):
     def test_default_constructor_values(self) -> None:
         detector = RoundBoundaryDetector()
         self.assertEqual(detector._state_key, "round_info.round_active")
-        self.assertEqual(detector._debounce, 3)
-        self.assertEqual(detector._min_duration, 5.0)
+        self.assertEqual(detector._debounce, 8)
+        self.assertEqual(detector._min_duration, 15.0)
 
     def test_custom_state_key(self) -> None:
         detector = RoundBoundaryDetector(state_key="custom.round_flag")
@@ -78,7 +78,7 @@ class RoundBoundaryDetectorBasicTests(TestCase):
     """Single-round life-cycle tests."""
 
     def test_complete_round_lifecycle(self) -> None:
-        detector = RoundBoundaryDetector(debounce_frames=2)
+        detector = RoundBoundaryDetector(debounce_frames=2, min_round_duration_sec=0.0)
         events: list = []
 
         # Freeze time --- no events

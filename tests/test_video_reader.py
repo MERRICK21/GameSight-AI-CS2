@@ -175,7 +175,7 @@ class FrameSamplingTests(TestCase):
         )
 
     def test_frames_seek_is_called_with_correct_positions(self) -> None:
-        """Verify capture.set() is called for each sample position."""
+        """Verify sequential read uses grab() for skipping, not set()."""
         capture = self._capture_for_sampling(
             native_fps=60.0, total_frames=120
         )
@@ -184,10 +184,11 @@ class FrameSamplingTests(TestCase):
 
         list(reader.frames(video, sample_fps=10.0))
 
-        expected_calls = [
-            call(1, i * 6) for i in range(20)
-        ]
-        capture.set.assert_has_calls(expected_calls)
+        # 60fps / 10fps = step 6, 120 frames total = 20 reads + 100 grabs
+        self.assertEqual(capture.read.call_count, 20)
+        self.assertEqual(capture.grab.call_count, 100)
+        # set() should never be called with sequential reading
+        capture.set.assert_not_called()
 
     # -- edge cases ------------------------------------------------------
 

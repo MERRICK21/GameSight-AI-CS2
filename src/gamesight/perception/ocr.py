@@ -1,13 +1,16 @@
 """OCR-based HUD text extraction for CS2.
 
-Uses EasyOCR (optional dependency) to read round scores, player names,
-and kill-feed entries from the HUD.  All extractors degrade gracefully
-when EasyOCR is not installed.
+Uses EasyOCR (optional) to read round scores and player names.
+Optimized for speed: OCR runs only on sparse keyframes, with
+results cached between checks.
+
+Requires: pip install easyocr
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import numpy as np
@@ -15,9 +18,10 @@ from numpy.typing import NDArray
 
 _log = logging.getLogger(__name__)
 
+_OCR_INTERVAL_SEC = 3.0  # Only run OCR every N seconds
+
 
 def _get_easyocr():
-    """Lazy-import EasyOCR; returns None if not installed."""
     try:
         import easyocr
         return easyocr
@@ -28,50 +32,48 @@ def _get_easyocr():
 class ScoreReader:
     """Read round scores from the round_info HUD region.
 
-    The CS2 round-info area (top-centre) displays the round timer and
-    team scores like "CT 3 : 2 T".  This reader extracts the score
-    numbers and computes the current round number.
-
-    Round number = CT_score + T_score + 1 (first half is to 12, then switch)
-
-    Usage
-    -----
-    .. code-block:: python
-
-        reader = ScoreReader()
-        ct, t, round_num = reader.read(crop, frame_index, timestamp)
+    To avoid running OCR on every frame (which is prohibitively slow),
+    this reader only performs OCR every ``_OCR_INTERVAL_SEC`` seconds.
+    Between OCR checks, cached values are returned.
     """
 
     def __init__(self) -> None:
         self._ocr = None
         self._init_attempted = False
-        self._last_scores: tuple[int, int] | None = None
+        self._last_ocr_time = 0.0
+        self._last_scores: tuple[int, int] = (0, 0)
         self._last_round = 0
 
     @property
     def available(self) -> bool:
         if not self._init_attempted:
-            self._ocr = _get_easyocr()
+            easy = _get_easyocr()
             self._init_attempted = True
-            if self._ocr is not None:
-                # Lazy init the reader (costly, only once)
+            if easy is not None:
                 try:
-                    self._reader = self._ocr.Reader(["en"], gpu=False, verbose=False)
+                    self._reader = easy.Reader(["en"], gpu=True, verbose=False)
+                    self._ocr = easy
                 except Exception:
-                    self._ocr = None
+                    pass
         return self._ocr is not None
 
     def read(
         self, crop: NDArray[np.uint8], frame_index: int, timestamp_sec: float
     ) -> dict[str, Any]:
-        """Return {ct_score, t_score, round_number, active} or defaults."""
+        """Return {ct_score, t_score, round_number, active}. Runs OCR only every N seconds."""
         if not self.available:
-            return {"round_active": True, "ct_score": 0, "t_score": 0, "round_number": 0}
+            return self._fallback()
+
+        # Only run OCR every _OCR_INTERVAL_SEC seconds
+        if timestamp_sec - self._last_ocr_time < _OCR_INTERVAL_SEC:
+            ct, t = self._last_scores
+            return {"round_active": True, "ct_score": ct, "t_score": t, "round_number": ct + t + 1}
+
+        self._last_ocr_time = timestamp_sec
 
         try:
             results = self._reader.readtext(crop, detail=0)
             text = " ".join(results).strip()
-            # Parse "CT 3 : 2 T" pattern
             nums = []
             for part in text.replace(":", " ").split():
                 try:
@@ -80,33 +82,21 @@ class ScoreReader:
                     pass
             if len(nums) >= 2:
                 ct, t = nums[0], nums[1]
-                round_num = ct + t + 1
                 self._last_scores = (ct, t)
-                self._last_round = round_num
-                return {"round_active": True, "ct_score": ct, "t_score": t, "round_number": round_num}
-        except Exception as exc:
-            _log.debug("ScoreReader error: %s", exc)
+                self._last_round = ct + t + 1
+                return {"round_active": True, "ct_score": ct, "t_score": t, "round_number": self._last_round}
+        except Exception:
+            pass
 
-        # Fallback to last known
-        if self._last_scores:
-            ct, t = self._last_scores
-            return {"round_active": True, "ct_score": ct, "t_score": t, "round_number": self._last_round}
-        return {"round_active": True, "ct_score": 0, "t_score": 0, "round_number": 0}
+        return self._fallback()
+
+    def _fallback(self) -> dict[str, Any]:
+        ct, t = self._last_scores
+        return {"round_active": True, "ct_score": ct, "t_score": t, "round_number": ct + t + 1}
 
 
 class PlayerNameReader:
-    """Read player name from the player_status HUD region.
-
-    When spectating, the bottom-centre area shows the spectated player's
-    name.  This reader extracts that name for player-filtering.
-
-    Usage
-    -----
-    .. code-block:: python
-
-        reader = PlayerNameReader()
-        name = reader.read(crop)  # -> str or None
-    """
+    """Read player name from the player_status HUD region."""
 
     def __init__(self) -> None:
         self._ocr = None
@@ -119,14 +109,13 @@ class PlayerNameReader:
             self._init_attempted = True
             if easy is not None:
                 try:
-                    self._reader = easy.Reader(["en"], gpu=False, verbose=False)
+                    self._reader = easy.Reader(["en"], gpu=True, verbose=False)
                     self._ocr = easy
                 except Exception:
                     pass
         return self._ocr is not None
 
     def read(self, crop: NDArray[np.uint8]) -> str | None:
-        """Return detected player name or None."""
         if not self.available:
             return None
         try:

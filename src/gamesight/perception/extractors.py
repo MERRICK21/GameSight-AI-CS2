@@ -35,6 +35,11 @@ _WHITE_TEXT_HIGH = np.array([255, 255, 255], dtype=np.uint8)
 
 _YELLOW_TEXT_LOW = np.array([0, 180, 180], dtype=np.uint8)
 _YELLOW_TEXT_HIGH = np.array([70, 255, 255], dtype=np.uint8)
+_CT_SCORE_LOW = np.array([100, 120, 180], dtype=np.uint8)
+_CT_SCORE_HIGH = np.array([200, 220, 255], dtype=np.uint8)
+_T_SCORE_LOW = np.array([0, 140, 200], dtype=np.uint8)
+_T_SCORE_HIGH = np.array([60, 220, 255], dtype=np.uint8)
+_SCORE_PIXEL_MIN = 8
 
 # Minimum fraction of non-black pixels in a region to consider it "active".
 _ACTIVITY_THRESHOLD = 0.005
@@ -194,7 +199,10 @@ class MoneyExtractor(RegionExtractor):
 
 
 class RoundInfoExtractor(RegionExtractor):
-    """Detect whether the round-info HUD is active (timer / scores visible)."""
+    """Extract round info: timer + score colours.
+
+    Top half = timer (white), bottom half = scores (CT blue, T yellow).
+    """
 
     def extract(
         self,
@@ -202,13 +210,25 @@ class RoundInfoExtractor(RegionExtractor):
         frame_index: int,
         timestamp_sec: float,
     ) -> dict[str, object]:
-        white_mask = cv_in_range(region_image, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
-        bright_pixels = int(np.sum(white_mask > 0))
-        total = max(region_image.size // 3, 1)
+        if region_image.size == 0:
+            return {"round_active": False, "scores_visible": False,
+                    "ct_score_present": False, "t_score_present": False}
+
+        h = region_image.shape[0]
+        timer_zone = region_image[: h // 2, :]
+        white_mask = cv_in_range(timer_zone, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
+        timer_active = int(np.sum(white_mask > 0)) > _TEXT_PIXEL_THRESHOLD
+
+        score_zone = region_image[h // 2:, :]
+        ct_present = int(np.sum(cv_in_range(score_zone, _CT_SCORE_LOW, _CT_SCORE_HIGH) > 0)) > _SCORE_PIXEL_MIN
+        t_present = int(np.sum(cv_in_range(score_zone, _T_SCORE_LOW, _T_SCORE_HIGH) > 0)) > _SCORE_PIXEL_MIN
 
         return {
-            "round_active": (bright_pixels / total) > _ACTIVITY_THRESHOLD,
-            "timer_visible": bright_pixels > _TEXT_PIXEL_THRESHOLD,
+            "round_active": timer_active,
+            "timer_visible": timer_active,
+            "ct_score_present": ct_present,
+            "t_score_present": t_present,
+            "scores_visible": ct_present and t_present,
         }
 
 

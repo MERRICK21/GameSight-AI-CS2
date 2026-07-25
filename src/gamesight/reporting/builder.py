@@ -69,7 +69,7 @@ class EvidenceReportBuilder:
         teammate_tracks = sum(1 for t in tl_round.tracks if t.label == "teammate")
         return RoundStats(
             round_id=ra.round_id, duration_sec=duration, kills_detected=kills,
-            deaths_detected=deaths, killfeed_events=killfeed, enemy_tracks=enemy_tracks,
+            player_died=(deaths > 0), deaths_detected=deaths, killfeed_events=killfeed, enemy_tracks=enemy_tracks,
             teammate_tracks=teammate_tracks, enemy_first_visible_sec=enemy_first_vis,
             combat_segments=combat_segments,
         )
@@ -99,13 +99,13 @@ class EvidenceReportBuilder:
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_kills",
                 FindingCategory.COMBAT, FindingSeverity.INFO,
                 t.t("report_finding.kills_detected", n=stats.kills_detected), 0.55, evidence))
-        if stats.deaths_detected > 0:
+        if stats.player_died:
             death_events = [e for e in ra.events if e.event_type == EventType.PLAYER_DEATH]
             evidence = [lk for ev in death_events for lk in self._to_links(ev.evidence)]
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_deaths",
                 FindingCategory.COMBAT, FindingSeverity.WARNING,
-                t.t("report_finding.deaths_detected", n=stats.deaths_detected), 0.85, evidence))
-        if stats.kills_detected == 0 and stats.deaths_detected == 0:
+                t.t("report_finding.deaths_detected", n=1), 0.85, evidence))
+        if stats.kills_detected == 0 and not stats.player_died:
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_none",
                 FindingCategory.COMBAT, FindingSeverity.INFO,
                 t.t("report_finding.no_combat"), 0.70, []))
@@ -123,7 +123,7 @@ class EvidenceReportBuilder:
 
     def _build_overview(self, analysis, round_reports, timeline) -> MatchOverview:
         total_kills = sum(r.stats.kills_detected for r in round_reports)
-        total_deaths = sum(r.stats.deaths_detected for r in round_reports)
+        total_deaths = sum(1 for r in round_reports if r.stats.player_died)
         total_enemy = sum(r.stats.enemy_tracks for r in round_reports)
         return MatchOverview(
             video_id=analysis.video.video_id, source_name=analysis.video.source_name,

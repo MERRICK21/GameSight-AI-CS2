@@ -5,7 +5,7 @@ Usage: streamlit run src/gamesight/web/app.py
 
 from __future__ import annotations
 
-import io, json, tempfile
+import io, json, tempfile, time
 from pathlib import Path
 
 import numpy as np
@@ -41,13 +41,14 @@ if "analysis_run" not in st.session_state:
         "player_filter": False, "player_name": "", "use_ocr": False, "use_yolo": False,
     })
 
+MAX_TIME_REAL = 300    # 5 min max for real video
+MAX_TIME_DEMO = 60     # 1 min max for demo
+OCR_EVERY_N = 30       # Only pass image to OCR every N frames
+YOLO_EVERY_N = 5       # Only run YOLO every N frames
 
-def _loader():
-    return I18nLoader(st.session_state.get("locale", "en"))
 
-
-def _t(key: str, **kwargs) -> str:
-    return _loader().t(key, **kwargs)
+def _loader(): return I18nLoader(st.session_state.get("locale", "en"))
+def _t(key: str, **kwargs) -> str: return _loader().t(key, **kwargs)
 
 
 def _filter_post_death(analysis: AnalysisResult) -> tuple[AnalysisResult, int]:
@@ -56,56 +57,65 @@ def _filter_post_death(analysis: AnalysisResult) -> tuple[AnalysisResult, int]:
     for ra in analysis.rounds:
         death_ts = None
         for e in ra.events:
-            if e.event_type == EventType.PLAYER_DEATH:
-                death_ts = e.start_sec; break
-        if death_ts is None:
-            filtered_rounds.append(ra); continue
-        kept = [e for e in ra.events if e.start_sec <= death_ts
-                or e.event_type in (EventType.ROUND_START, EventType.ROUND_END)]
+            if e.event_type == EventType.PLAYER_DEATH: death_ts = e.start_sec; break
+        if death_ts is None: filtered_rounds.append(ra); continue
+        kept = [e for e in ra.events if e.start_sec <= death_ts or e.event_type in (EventType.ROUND_START, EventType.ROUND_END)]
         skipped += len(ra.events) - len(kept)
         new_end = death_ts if ra.end_sec and death_ts < ra.end_sec else ra.end_sec
         filtered_rounds.append(RoundAnalysis(round_id=ra.round_id, start_sec=ra.start_sec, end_sec=new_end, events=kept))
     return AnalysisResult(video=analysis.video, metadata=analysis.metadata, rounds=filtered_rounds,
-                          warnings=analysis.warnings + [f"[player_filter] Skipped {skipped} spectating events"]), skipped
+                          warnings=analysis.warnings), skipped
 
 
 def _real_pipeline(video_path: str, sample_fps: float) -> dict:
+    t0 = time.time()
     st.session_state["status"] = _t("run.reading_meta"); st.session_state["progress"] = 5
     video = VideoInput(video_id=Path(video_path).stem, path=Path(video_path))
     reader = OpenCVVideoReader(); metadata = reader.inspect(video)
+    duration = metadata.duration_sec or 60
+    total_est = int(duration * sample_fps)
+
     st.session_state["status"] = _t("run.processing", w=metadata.width or 0, h=metadata.height or 0, fps=metadata.fps or 0)
     st.session_state["progress"] = 10
+
     parser = CS2HudParser(CS2_STANDARD_16X9, {
         "crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
         "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(),
         "round_info": RoundInfoExtractor(),
     })
-    # Optional OCR round detector
+
     use_ocr = st.session_state.get("use_ocr", False)
     ocr_detector = OCRRoundDetector()
-    if use_ocr and ocr_detector.available:
-        pass  # OCR detector is ready
-    elif use_ocr:
-        st.warning("EasyOCR not installed. Run: pip install easyocr")
+    if use_ocr and not ocr_detector.available:
+        st.warning("EasyOCR not installed. Run: pip install easyocr. Falling back to heuristic detection.")
         use_ocr = False
 
     hud_states = []
-    total_frames = int((metadata.duration_sec or 60) * sample_fps)
     for i, frame in enumerate(reader.frames(video, sample_fps)):
+        if time.time() - t0 > MAX_TIME_REAL:
+            st.warning(f"Analysis timed out after {MAX_TIME_REAL}s. Processing partial results.")
+            break
         state = parser.parse(frame.image, frame.frame_index, frame.timestamp_sec)
-        hud_states.append((state, frame.image if use_ocr else None))
+        # Only pass full image to OCR every OCR_EVERY_N frames (sparse sampling)
+        img_for_ocr = frame.image if (use_ocr and i % OCR_EVERY_N == 0) else None
+        hud_states.append((state, img_for_ocr))
         if i % 30 == 0:
-            pct = min(10 + int(60 * i / max(total_frames, 1)), 70)
+            elapsed = time.time() - t0
+            if i > 0:
+                eta = elapsed / i * (total_est - i)
+            else:
+                eta = 0
+            pct = min(10 + int(60 * i / max(total_est, 1)), 70)
             st.session_state["progress"] = pct
-            st.session_state["status"] = _t("run.processing_frame", n=i)
+            st.session_state["status"] = f"{_t('run.processing_frame', n=i)} | ETA {eta:.0f}s"
 
-    st.session_state["status"] = _t("run.detecting_events", n=len(hud_states))
+    n_states = len(hud_states)
+    st.session_state["status"] = _t("run.detecting_events", n=n_states)
     st.session_state["progress"] = 75
 
-    # Event detection -- use OCR if available, otherwise heuristic
     rbd = RoundBoundaryDetector(); ked = KillEventDetector()
     events = []
-    if use_ocr and ocr_detector.available:
+    if use_ocr:
         for state, image in hud_states:
             if image is not None:
                 events.extend(ocr_detector.update(state, image))
@@ -128,7 +138,9 @@ def _real_pipeline(video_path: str, sample_fps: float) -> dict:
     cr = builder.build(analysis)
     st.session_state["coach_suggestions"] = coach.generate(analysis, cr)
     st.session_state["coach_summary"] = coach.summarize(st.session_state["coach_suggestions"], analysis, cr)
-    st.session_state["progress"] = 100; st.session_state["status"] = _t("run.complete")
+    st.session_state["progress"] = 100
+    elapsed_total = time.time() - t0
+    st.session_state["status"] = f"{_t('run.complete')} ({elapsed_total:.0f}s)"
     return cr.model_dump(mode="json")
 
 
@@ -170,12 +182,12 @@ with st.sidebar:
         pn = st.text_input(_t("sidebar.player_name"), value=st.session_state.get("player_name", ""), help=_t("sidebar.player_name_help"))
         st.session_state["player_name"] = pn; st.caption(_t("player_filter.active"))
     st.divider()
-    st.subheader("\U0001f9e0 AI Features")
-    use_ocr = st.checkbox("OCR Round Detection (EasyOCR)", value=st.session_state.get("use_ocr", False),
-                          help="Read scores via OCR for accurate round detection. Requires: pip install easyocr")
+    st.subheader(f"\U0001f9e0 {_t("sidebar.ai_features")}")
+    use_ocr = st.checkbox(_t("sidebar.ocr_label"), value=st.session_state.get("use_ocr", False),
+                          help=_t("sidebar.ocr_help"))
     st.session_state["use_ocr"] = use_ocr
-    use_yolo = st.checkbox("YOLO Player Detection", value=st.session_state.get("use_yolo", False),
-                           help="Detect and classify players. Requires: pip install ultralytics torch")
+    use_yolo = st.checkbox(_t("sidebar.yolo_label"), value=st.session_state.get("use_yolo", False),
+                           help=_t("sidebar.yolo_help"))
     st.session_state["use_yolo"] = use_yolo
     st.divider()
     st.subheader(f"\u2699\ufe0f {_t('sidebar.settings')}")
@@ -241,7 +253,7 @@ with t1:
     for r in result.get("rounds", []):
         s = r["stats"]
         rows.append({_t("overview.round"): r["round_id"], _t("overview.duration"): f"{r.get('duration_sec',0):.1f}s" if r.get("duration_sec") else "-",
-                     _t("overview.kills"): s["kills_detected"], _t("overview.deaths"): s["deaths_detected"],
+                     _t("overview.kills"): s["kills_detected"], _t("overview.player_died"): "Yes" if s.get("player_died") else "No",
                      _t("overview.killfeed"): s["killfeed_events"], _t("overview.enemy_tracks"): s["enemy_tracks"],
                      _t("overview.first_enemy"): f"{s.get('enemy_first_visible_sec',0):.1f}s" if s.get("enemy_first_visible_sec") else "-"})
     st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -306,24 +318,24 @@ with t5:
                 st.caption(f"{_t('coach.confidence')}: {s.confidence:.2f} | id: {s.suggestion_id}")
                 if screenshots:
                     for img in screenshots:
-                        if abs(img.timestamp_sec - s.timestamp_sec) < 1.0 and img.exists():
+                        if img.event_id == s.suggestion_id or abs(img.timestamp_sec - s.timestamp_sec) < 1.0 and img.exists():
                             st.image(str(img.image_path), caption=f"frame {img.frame_index} | t={img.timestamp_sec:.1f}s", width=400); break
                 if s.evidence:
                     with st.expander(_t("coach.evidence"), expanded=False):
                         for lk in s.evidence: st.caption(f"frame={lk.frame_index or '?'} | t={lk.timestamp_sec:.1f}s | {lk.source}")
     if coach_summary:
-        st.divider(); st.subheader("\U0001f3c6 Post-Match Summary")
-        st.markdown(f"**Assessment:** {coach_summary.overall_assessment}")
-        ca, cb = st.columns(2)
+        st.divider(); st.subheader(f"\U0001f3c6 {_t("summary_title")}")
+        st.markdown(f"**{_t("assessment")}:** {coach_summary.overall_assessment}")
+        ca,cb = st.columns(2)
         with ca:
-            st.markdown("### Strengths")
+            st.markdown(f"### {_t("strengths")}")
             for item in coach_summary.strengths: st.markdown(f"- {item}")
-            st.markdown("### Focus Areas")
+            st.markdown(f"### {_t("focus_areas")}")
             for item in coach_summary.focus_areas: st.markdown(f"- {item}")
         with cb:
-            st.markdown("### Weaknesses")
+            st.markdown(f"### {_t("weaknesses")}")
             for item in coach_summary.weaknesses: st.markdown(f"- {item}")
-            st.markdown("### Practice Drills")
+            st.markdown(f"### {_t("practice_drills")}")
             for item in coach_summary.practice_drills: st.markdown(f"- {item}")
 
 # Live
@@ -341,7 +353,7 @@ with t6:
     lr = st.session_state.get("live_result")
     if lr is not None:
         st.divider(); st.subheader(f"\U0001f3af {_t('live.results')}")
-        cx, cy = st.columns(2)
+        cx,cy = st.columns(2)
         with cx: st.metric(_t("live.status"), lr.status); st.markdown(f"**{_t('live.next_action')}:** {lr.next_action}")
         with cy:
             st.markdown(f"### {_t('live.tips')}")

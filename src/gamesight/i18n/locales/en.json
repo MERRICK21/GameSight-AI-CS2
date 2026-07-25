@@ -19,7 +19,12 @@
     "player_filter": "Filter by Player",
     "player_filter_help": "Only analyze frames from your POV. Skips spectating after death.",
     "player_name": "Player Name",
-    "player_name_help": "Your in-game name (future: OCR matching). Currently skips post-death spectating frames."
+    "player_name_help": "Your in-game name (future: OCR matching). Currently skips post-death spectating frames.",
+    "ocr_label": "OCR Round Detection",
+    "ocr_help": "Read scores via colour detection. More stable than timer-based.",
+    "yolo_label": "YOLO Player Detection",
+    "yolo_help": "Detect and classify players. Requires GPU + pip install ultralytics torch",
+    "ai_features": "AI Features"
   },
   "run": {
     "button": "Run Analysis",
@@ -55,7 +60,8 @@
     "round_summary": "Round Summary",
     "round": "Round",
     "killfeed": "Killfeed",
-    "first_enemy": "1st Enemy"
+    "first_enemy": "1st Enemy",
+    "player_died": "Died"
   },
   "timeline": {
     "title": "Event Timeline",
@@ -196,5 +202,11 @@
     "tip_default": "No specific threats detected -- maintain map awareness and check minimap.",
     "round_active": "Round is active",
     "round_inactive": "Round is not active (freeze time or ended)"
-  }
+  },
+  "summary_title": "Post-Match Summary",
+  "strengths": "Strengths",
+  "weaknesses": "Weaknesses",
+  "focus_areas": "Focus Areas",
+  "practice_drills": "Practice Drills",
+  "assessment": "Assessment"
 }
