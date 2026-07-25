@@ -6,54 +6,66 @@ streaming pipeline or used standalone with a list of states.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
 
 from gamesight.domain.models import EventType, Evidence, GameEvent, HudState, Track
 from gamesight.events.engine import EventEngine
 
 
-class RoundBoundaryDetector(EventEngine):
-    """Detect round start / end by tracking ``round_active`` state transitions.
+# Smoothing window for timer_pixel_ratio (frames).
+_SMOOTH_WINDOW = 5
+# Smoothed ratio must drop below this to declare timer absent.
+_RATIO_LOW = 0.001
+# Smoothed ratio must rise above this to declare timer present.
+_RATIO_HIGH = 0.006
 
-    Uses a configurable debounce window so that brief flickers in the
-    colour-heuristic HUD extraction do not produce false events.  A
-    minimum round duration rejects implausibly short rounds (e.g. caused
-    by HUD extraction noise during freeze time).
+
+class RoundBoundaryDetector(EventEngine):
+    """Detect round start / end by tracking timer pixel ratio over time.
+
+    Uses a smoothed timer pixel ratio (from ``RoundInfoExtractor``)
+    instead of a binary ``round_active`` flag.  This is far more
+    robust against brief flickers and scoreboard transitions.
 
     Parameters
     ----------
-    state_key:
-        The ``HudState.values`` key that carries the ``round_active``
-        boolean from the ``RoundInfoExtractor``.
-    debounce_frames:
-        Number of *consecutive* frames that must agree before a
-        transition is confirmed.
+    ratio_key:
+        The ``HudState.values`` key that carries the
+        ``timer_pixel_ratio`` float.
+    smooth_window:
+        Number of frames over which to average the ratio.
+    ratio_high:
+        Smoothed ratio above this threshold signals timer visible.
+    ratio_low:
+        Smoothed ratio below this threshold signals timer absent.
     min_round_duration_sec:
-        Rounds shorter than this are suppressed (start+end pair dropped).
+        Rounds shorter than this are suppressed.
     """
 
     def __init__(
         self,
-        state_key: str = "round_info.round_active",
-        debounce_frames: int = 3,
+        ratio_key: str = "round_info.timer_pixel_ratio",
+        smooth_window: int = _SMOOTH_WINDOW,
+        ratio_high: float = _RATIO_HIGH,
+        ratio_low: float = _RATIO_LOW,
         min_round_duration_sec: float = 3.0,
     ) -> None:
-        if debounce_frames < 1:
-            raise ValueError("debounce_frames must be >= 1")
-        if min_round_duration_sec < 0:
-            raise ValueError("min_round_duration_sec must be >= 0")
-
-        self._state_key = state_key
-        self._debounce = debounce_frames
+        self._ratio_key = ratio_key
+        self._smooth_win = max(1, smooth_window)
+        self._ratio_high = ratio_high
+        self._ratio_low = ratio_low
         self._min_duration = min_round_duration_sec
 
         # -- volatile state (reset per video) ---------------------------------
+        self._history: deque[float] = deque(maxlen=self._smooth_win)
+        self._smoothed_ratio = 0.0
         self._round_counter = 0
-        self._phase: str = "idle"            # idle | candidate_start | in_round | candidate_end
-        self._debounce_count = 0
-        self._transition_frame: int | None = None
-        self._transition_ts: float | None = None
+        self._in_round = False
         self._last_start_ts: float | None = None
+        self._round_start_fi: int | None = None
+        self._absence_count = 0
+        self._presence_count = 0
         self._pending_events: list[GameEvent] = []
 
     # -- EventEngine interface -----------------------------------------------
@@ -61,115 +73,76 @@ class RoundBoundaryDetector(EventEngine):
     def update(
         self, hud_state: HudState, tracks: Sequence[Track] = ()
     ) -> Sequence[GameEvent]:
-        """Ingest one frame and return any newly confirmed events."""
-        active = hud_state.values.get(self._state_key)
-        is_active = bool(active) if active is not None else False
+        self._pending_events.clear()
+
+        raw = float(hud_state.values.get(self._ratio_key, 0))
         fi = hud_state.frame_index
         ts = hud_state.timestamp_sec
 
-        self._pending_events.clear()
-        self._transition(is_active, fi, ts)
+        # Maintain rolling average.
+        self._history.append(raw)
+        self._smoothed_ratio = sum(self._history) / len(self._history)
+
+        timer_present = self._smoothed_ratio > self._ratio_high
+        timer_absent = self._smoothed_ratio < self._ratio_low
+
+        if not self._in_round:
+            # Looking for round start: timer must be consistently present.
+            if timer_present:
+                self._presence_count += 1
+                if self._presence_count >= 5:
+                    self._confirm_round_start(fi, ts)
+            else:
+                self._presence_count = 0
+        else:
+            # In round: look for sustained timer absence (scoreboard).
+            if timer_absent:
+                self._absence_count += 1
+                if self._absence_count >= 10:
+                    self._confirm_round_end(fi, ts)
+            else:
+                self._absence_count = max(0, self._absence_count - 1)
+
         return tuple(self._pending_events)
 
     def finalize(self) -> Sequence[GameEvent]:
-        """Emit a ROUND_END if the video ended mid-round."""
         events: list[GameEvent] = []
-
-        if self._phase in ("candidate_start", "in_round"):
-            # We never saw the round end — force one.
+        if self._in_round:
             self._round_counter += 1
             rid = f"round_{self._round_counter:03d}"
-            events.append(self._make_event(
-                EventType.ROUND_END,
-                rid,
-                self._transition_ts or 0.0,
-                fi=None,
-            ))
-
+            events.append(self._make_event(EventType.ROUND_END, rid, 0.0, fi=None))
         self._reset()
         return events
 
     # -- internal ------------------------------------------------------------
 
-    def _transition(self, active: bool, fi: int, ts: float) -> None:
-        """State machine: detect confirmed rising/falling edges of *active*."""
-
-        if self._phase == "idle":
-            if active:
-                self._phase = "candidate_start"
-                self._debounce_count = 1
-                self._transition_frame = fi
-                self._transition_ts = ts
-                if self._debounce_count >= self._debounce:
-                    self._confirm_round_start(fi, ts)
-
-        elif self._phase == "candidate_start":
-            if active:
-                self._debounce_count += 1
-                if self._debounce_count >= self._debounce:
-                    self._confirm_round_start(fi, ts)
-            else:
-                # False alarm — reset.
-                self._phase = "idle"
-                self._debounce_count = 0
-
-        elif self._phase == "in_round":
-            if not active:
-                self._phase = "candidate_end"
-                self._debounce_count = 1
-                self._transition_frame = fi
-                self._transition_ts = ts
-                if self._debounce_count >= self._debounce:
-                    self._confirm_round_end(fi, ts)
-
-        elif self._phase == "candidate_end":
-            if not active:
-                self._debounce_count += 1
-                if self._debounce_count >= self._debounce:
-                    self._confirm_round_end(fi, ts)
-            else:
-                # False alarm — back to in_round.
-                self._phase = "in_round"
-                self._debounce_count = 0
-
     def _confirm_round_start(self, fi: int, ts: float) -> None:
         self._round_counter += 1
         rid = f"round_{self._round_counter:03d}"
-        start_ts = self._transition_ts if self._transition_ts is not None else ts
-        self._last_start_ts = start_ts
-        self._phase = "in_round"
-        self._debounce_count = 0
-
+        self._in_round = True
+        self._last_start_ts = ts
+        self._round_start_fi = fi
+        self._absence_count = 0
+        self._presence_count = 0
         self._pending_events.append(
-            self._make_event(EventType.ROUND_START, rid, start_ts, fi=fi)
+            self._make_event(EventType.ROUND_START, rid, ts, fi=fi)
         )
 
     def _confirm_round_end(self, fi: int, ts: float) -> None:
-        end_ts = self._transition_ts if self._transition_ts is not None else ts
         rid = f"round_{self._round_counter:03d}"
-
         # Suppress implausibly short rounds.
-        if (
-            self._last_start_ts is not None
-            and (end_ts - self._last_start_ts) < self._min_duration
-        ):
-            self._phase = "in_round"  # keep the round open
-            self._debounce_count = 0
+        if self._last_start_ts is not None and (ts - self._last_start_ts) < self._min_duration:
+            self._absence_count = 0
             return
-
-        self._phase = "idle"
-        self._debounce_count = 0
-
+        self._in_round = False
+        self._absence_count = 0
+        self._presence_count = 0
         self._pending_events.append(
-            self._make_event(EventType.ROUND_END, rid, end_ts, fi=fi)
+            self._make_event(EventType.ROUND_END, rid, ts, fi=fi)
         )
 
     def _make_event(
-        self,
-        event_type: EventType,
-        round_id: str,
-        ts: float,
-        fi: int | None,
+        self, event_type: EventType, round_id: str, ts: float, fi: int | None
     ) -> GameEvent:
         return GameEvent(
             event_id=f"{event_type.value}_{round_id}",
@@ -180,19 +153,21 @@ class RoundBoundaryDetector(EventEngine):
                 Evidence(
                     frame_index=fi,
                     timestamp_sec=ts,
-                    source=f"RoundBoundaryDetector.{self._state_key}",
+                    source=f"RoundBoundaryDetector.{self._ratio_key}",
                 )
             ],
             attributes={"round_id": round_id},
         )
 
     def _reset(self) -> None:
+        self._history.clear()
+        self._smoothed_ratio = 0.0
         self._round_counter = 0
-        self._phase = "idle"
-        self._debounce_count = 0
-        self._transition_frame = None
-        self._transition_ts = None
+        self._in_round = False
         self._last_start_ts = None
+        self._round_start_fi = None
+        self._absence_count = 0
+        self._presence_count = 0
         self._pending_events.clear()
 
 
@@ -314,7 +289,7 @@ class KillEventDetector(EventEngine):
             and (ts - self._last_kill_ts) < self._kill_cooldown
         )
 
-        # Rising edge: False → True starts observation
+        # Rising edge: False -> True starts observation
         if current and not self._kill_feed_was_active and not in_cooldown:
             self._kill_rising_count = 1
         elif current and self._kill_rising_count > 0:
@@ -337,7 +312,7 @@ class KillEventDetector(EventEngine):
                 event_id=f"player_kill_{self._kill_counter:03d}",
                 event_type=EventType.PLAYER_KILL,
                 start_sec=ts,
-                confidence=0.55,  # lower — colour heuristics cannot distinguish whose kill
+                confidence=0.55,
                 evidence=[
                     Evidence(
                         frame_index=fi,
