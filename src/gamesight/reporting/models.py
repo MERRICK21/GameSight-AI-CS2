@@ -69,6 +69,8 @@ class RoundStats(BaseModel):
     deaths_detected: int = 0
     killfeed_events: int = 0
     enemy_tracks: int = 0
+    enemies_encountered: int = 0
+    survival_sec: float | None = None
     teammate_tracks: int = 0
     enemy_first_visible_sec: float | None = None
     combat_segments: int = 0
@@ -97,6 +99,8 @@ class MatchOverview(BaseModel):
     total_kills_detected: int = 0
     total_deaths_detected: int = 0
     total_enemy_tracks: int = 0
+    total_enemies_encountered: int = 0
+    avg_survival_sec: float | None = None
     warnings: list[str] = Field(default_factory=list)
 
 

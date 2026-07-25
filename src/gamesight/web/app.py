@@ -85,7 +85,7 @@ def _real_pipeline(video_path: str, sample_fps: float) -> dict:
     })
 
     use_ocr = st.session_state.get("use_ocr", False)
-    ocr_detector = OCRRoundDetector()
+    ocr_detector = OCRRoundDetector(profile=CS2_STANDARD_16X9)
     if use_ocr and not ocr_detector.available:
         st.warning("EasyOCR not installed. Run: pip install easyocr. Falling back to heuristic detection.")
         use_ocr = False
@@ -218,7 +218,7 @@ if run_clicked:
                 analysis = st.session_state.get("analysis_obj")
                 if analysis is not None:
                     important = [e for r in analysis.rounds for e in r.events
-                                 if e.event_type.value in ("player_kill", "player_death", "round_start", "enemy_first_visible")]
+                                 if e.event_type.value in ("player_kill", "player_death", "enemy_first_visible")]
                     st.session_state["screenshots"] = extractor.extract(video_path, important)
             finally: Path(video_path).unlink(missing_ok=True)
         st.session_state["result"] = result; st.rerun()
@@ -287,8 +287,8 @@ with t3:
         if r.get("duration_sec"): st.caption(f"{_t('report.duration_label')}: {r['duration_sec']:.1f}s")
         s = r["stats"]; c1,c2,c3,c4 = st.columns(4)
         c1.metric(_t("report.kills_label"), s["kills_detected"]); c2.metric(_t("report.deaths_label"), s["deaths_detected"])
-        c3.metric(_t("report.enemy_tracks_label"), s["enemy_tracks"])
-        c4.metric(_t("report.first_enemy_label"), f"{s.get('enemy_first_visible_sec',0):.1f}s" if s.get("enemy_first_visible_sec") else "N/A")
+        surv = f"{s["survival_sec"]:.0f}s" if s.get("survival_sec") else "N/A"; c3.metric(_t("report.survival_label"), surv); c4.metric(_t("report.enemies_label"), s.get("enemies_encountered", s.get("enemy_tracks", 0)))
+
         for f in r.get("findings", []):
             icon = {"info":"(i)","warning":"(!)","critical":"(!!)"}.get(f["severity"], ""); st.markdown(f"{icon} {f['text']}")
         st.divider()
@@ -318,7 +318,12 @@ with t5:
                 st.caption(f"{_t('coach.confidence')}: {s.confidence:.2f} | id: {s.suggestion_id}")
                 if screenshots:
                     for img in screenshots:
-                        if img.event_id == s.suggestion_id or abs(img.timestamp_sec - s.timestamp_sec) < 1.0 and img.exists():
+                        # Prefer exact event_id match; fall back to timestamp proximity.
+                        if img.event_id and (img.event_id in s.suggestion_id or s.suggestion_id in img.event_id) and img.exists():
+                            st.image(str(img.image_path), caption=f"frame {img.frame_index} | t={img.timestamp_sec:.1f}s", width=400); break
+                    # Second pass: timestamp proximity fallback.
+                    for img in screenshots:
+                        if abs(img.timestamp_sec - s.timestamp_sec) < 2.0 and img.exists():
                             st.image(str(img.image_path), caption=f"frame {img.frame_index} | t={img.timestamp_sec:.1f}s", width=400); break
                 if s.evidence:
                     with st.expander(_t("coach.evidence"), expanded=False):
@@ -358,6 +363,28 @@ with t6:
         with cy:
             st.markdown(f"### {_t('live.tips')}")
             for tip in lr.tips: st.markdown(f"- {tip}")
+
+# Live -- multi-frame from analyzed video
+    if st.session_state.get("analysis_run") and result is not None:
+        st.divider()
+        st.subheader(_t("live.select_frames"))
+        st.caption(_t("live.select_hint"))
+        # Get timeline events with screenshots
+        key_events = st.session_state.get("screenshots")
+        if key_events:
+            cols = st.columns(5)
+            for i, img in enumerate(key_events[:10]):
+                col_idx = i % 5
+                if img.exists():
+                    with cols[col_idx]:
+                        st.image(str(img.image_path), caption=f"t={img.timestamp_sec:.1f}s", width=150)
+                        if st.button(f"Analyze", key=f"live_frame_{i}"):
+                            pil_img = Image.open(str(img.image_path)).convert("RGB")
+                            frame = np.array(pil_img)[:,:,::-1].copy()
+                            parser = CS2HudParser(CS2_STANDARD_16X9, {"crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
+                                "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(), "round_info": RoundInfoExtractor()})
+                            st.session_state["live_result"] = LiveAnalyzer(parser, _loader()).analyze(frame, timestamp_sec=img.timestamp_sec)
+                            st.rerun()
 
 # JSON
 with t7:

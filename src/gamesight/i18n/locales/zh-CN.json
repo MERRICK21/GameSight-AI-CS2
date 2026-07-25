@@ -60,7 +60,9 @@
     "round": "回合",
     "killfeed": "击杀信息",
     "first_enemy": "首次遇敌",
-    "player_died": "是否阵亡"
+    "player_died": "是否阵亡",
+    "survival": "生存时间",
+    "enemies_encountered": "遇敌数"
   },
   "timeline": {
     "title": "事件时间线",
@@ -78,7 +80,9 @@
     "kills_label": "击杀",
     "deaths_label": "死亡",
     "enemy_tracks_label": "敌方轨迹",
-    "first_enemy_label": "首次遇敌时间"
+    "first_enemy_label": "首次遇敌时间",
+    "survival_label": "生存时间",
+    "enemies_label": "遇敌数"
   },
   "evidence": {
     "title": "证据浏览器",
@@ -162,7 +166,10 @@
     "results": "战术建议",
     "next_action": "推荐行动",
     "status": "当前状态",
-    "tips": "关键提示"
+    "tips": "关键提示",
+    "select_frames": "从录像中选择关键帧",
+    "analyze_selected": "分析所选帧",
+    "select_hint": "点击下方帧以使用实时分析器进行分析。"
   },
   "player_filter": {
     "skipped_frames": "已跳过 {n} 帧观战画面（死亡后）",

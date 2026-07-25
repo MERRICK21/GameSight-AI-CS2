@@ -67,9 +67,18 @@ class EvidenceReportBuilder:
         duration = round(ra.end_sec - ra.start_sec, 2) if ra.end_sec is not None else None
         enemy_tracks = sum(1 for t in tl_round.tracks if t.label == "enemy")
         teammate_tracks = sum(1 for t in tl_round.tracks if t.label == "teammate")
+        # Survival: time from round start to death, or full duration if survived.
+        survival: float | None = None
+        if duration is not None:
+            death_events = [e for e in ra.events if e.event_type == EventType.PLAYER_DEATH]
+            if death_events:
+                survival = round(min(e.start_sec for e in death_events) - ra.start_sec, 1)
+            else:
+                survival = round(duration, 1)
         return RoundStats(
             round_id=ra.round_id, duration_sec=duration, kills_detected=kills,
             player_died=(deaths > 0), deaths_detected=deaths, killfeed_events=killfeed, enemy_tracks=enemy_tracks,
+            enemies_encountered=enemy_tracks, survival_sec=survival,
             teammate_tracks=teammate_tracks, enemy_first_visible_sec=enemy_first_vis,
             combat_segments=combat_segments,
         )
@@ -125,12 +134,16 @@ class EvidenceReportBuilder:
         total_kills = sum(r.stats.kills_detected for r in round_reports)
         total_deaths = sum(1 for r in round_reports if r.stats.player_died)
         total_enemy = sum(r.stats.enemy_tracks for r in round_reports)
+        total_enemies = sum(r.stats.enemies_encountered for r in round_reports)
+        survivals = [r.stats.survival_sec for r in round_reports if r.stats.survival_sec is not None]
+        avg_surv = round(sum(survivals) / len(survivals), 1) if survivals else None
         return MatchOverview(
             video_id=analysis.video.video_id, source_name=analysis.video.source_name,
             duration_sec=analysis.metadata.duration_sec, fps=analysis.metadata.fps,
             resolution=timeline.resolution, total_rounds=len(round_reports),
             total_kills_detected=total_kills, total_deaths_detected=total_deaths,
             total_enemy_tracks=total_enemy, warnings=list(analysis.warnings),
+            total_enemies_encountered=total_enemies, avg_survival_sec=avg_surv,
         )
 
     def _build_match_findings(self, analysis, overview) -> list[ReportFinding]:
