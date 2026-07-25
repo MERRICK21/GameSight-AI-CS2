@@ -40,11 +40,19 @@ def _assert_event(
 
 
 
-def _ratio_state(fi: int, ts: float, ratio: float):
+def _ratio_state(
+    fi: int, ts: float, ratio: float,
+    ct_px: int = 0, t_px: int = 0,
+):
     from gamesight.domain.models import HudState
     return HudState(
         frame_index=fi, timestamp_sec=ts,
-        values={"round_info.timer_pixel_ratio": ratio}, confidence=0.5,
+        values={
+            "round_info.timer_pixel_ratio": ratio,
+            "round_info.ct_score_pixels": ct_px,
+            "round_info.t_score_pixels": t_px,
+        },
+        confidence=0.5,
     )
 
 
@@ -84,6 +92,8 @@ class RoundBoundaryDetectorInterfaceTests(TestCase):
     def test_default_constructor_values(self) -> None:
         detector = RoundBoundaryDetector()
         self.assertEqual(detector._ratio_key, "round_info.timer_pixel_ratio")
+        self.assertEqual(detector._ct_key, "round_info.ct_score_pixels")
+        self.assertEqual(detector._t_key, "round_info.t_score_pixels")
         self.assertEqual(detector._smooth_win, 5)
         self.assertEqual(detector._ratio_high, 0.006)
         self.assertEqual(detector._ratio_low, 0.001)
@@ -123,24 +133,26 @@ class RoundBoundaryDetectorBasicTests(TestCase):
     def test_two_complete_rounds(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001)
         events: list = []
+        # Round 1: first round, no prior scores needed.
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
         _assert_event(self, events[0], EventType.ROUND_START, "round_001")
         for i in range(5, 110):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         for i in range(110, 121):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.0))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=0, t_px=0))
         self.assertEqual(len(events), 2)
         _assert_event(self, events[1], EventType.ROUND_END, "round_001")
+        # Round 2: scores changed (200 vs 100), timer reappears -> new round.
         for i in range(121, 126):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=200, t_px=150))
         self.assertEqual(len(events), 3)
         _assert_event(self, events[2], EventType.ROUND_START, "round_002")
         for i in range(126, 230):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=200, t_px=150))
         for i in range(230, 241):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.0))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=0, t_px=0))
         self.assertEqual(len(events), 4)
         _assert_event(self, events[3], EventType.ROUND_END, "round_002")
 

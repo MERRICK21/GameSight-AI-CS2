@@ -195,6 +195,7 @@ class RoundInfoExtractor(RegionExtractor):
                 "ct_score_present": False, "t_score_present": False,
                 "scores_visible": False,
                 "timer_pixel_ratio": 0.0,
+                "ct_score_pixels": 0, "t_score_pixels": 0,
             }
 
         h = region_image.shape[0]
@@ -211,7 +212,9 @@ class RoundInfoExtractor(RegionExtractor):
         # Score zone: bottom ~40%.
         score_zone = region_image[int(h * 0.60):, :]
         ct_present = int(np.sum(cv_in_range(score_zone, _CT_SCORE_LOW, _CT_SCORE_HIGH) > 0)) > _SCORE_PIXEL_MIN
+        ct_px = int(np.sum(cv_in_range(score_zone, _CT_SCORE_LOW, _CT_SCORE_HIGH) > 0))
         t_present = int(np.sum(cv_in_range(score_zone, _T_SCORE_LOW, _T_SCORE_HIGH) > 0)) > _SCORE_PIXEL_MIN
+        t_px = int(np.sum(cv_in_range(score_zone, _T_SCORE_LOW, _T_SCORE_HIGH) > 0))
 
         return {
             "round_active": timer_active,
@@ -220,6 +223,8 @@ class RoundInfoExtractor(RegionExtractor):
             "ct_score_present": ct_present,
             "t_score_present": t_present,
             "scores_visible": ct_present and t_present,
+            "ct_score_pixels": ct_px,
+            "t_score_pixels": t_px,
         }
 
 

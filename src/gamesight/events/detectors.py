@@ -13,59 +13,70 @@ from gamesight.domain.models import EventType, Evidence, GameEvent, HudState, Tr
 from gamesight.events.engine import EventEngine
 
 
-# Smoothing window for timer_pixel_ratio (frames).
 _SMOOTH_WINDOW = 5
-# Smoothed ratio must drop below this to declare timer absent.
 _RATIO_LOW = 0.001
-# Smoothed ratio must rise above this to declare timer present.
 _RATIO_HIGH = 0.006
+_SCORE_CHANGE_RATIO = 0.30  # 30% pixel count change = score changed
 
 
 class RoundBoundaryDetector(EventEngine):
-    """Detect round start / end by tracking timer pixel ratio over time.
+    """Detect round boundaries with dual confirmation.
 
-    Uses a smoothed timer pixel ratio (from ``RoundInfoExtractor``)
-    instead of a binary ``round_active`` flag.  This is far more
-    robust against brief flickers and scoreboard transitions.
+    A new round requires BOTH:
+      1. Timer reappears (smoothed pixel ratio > threshold after being absent)
+      2. Score numbers changed (CT blue or T yellow pixel count shifted >30%)
+
+    This prevents false triggers during freeze-time countdown colour changes
+    (white -> red) and bomb-plant timer transitions.
 
     Parameters
     ----------
     ratio_key:
-        The ``HudState.values`` key that carries the
-        ``timer_pixel_ratio`` float.
+        HudState key for timer_pixel_ratio.
+    ct_pixels_key:
+        HudState key for CT score blue pixel count.
+    t_pixels_key:
+        HudState key for T score yellow pixel count.
     smooth_window:
-        Number of frames over which to average the ratio.
-    ratio_high:
-        Smoothed ratio above this threshold signals timer visible.
-    ratio_low:
-        Smoothed ratio below this threshold signals timer absent.
+        Frames for rolling average of timer ratio.
+    ratio_high / ratio_low:
+        Hysteresis thresholds for timer visibility.
+    score_change_ratio:
+        Minimum fraction change in score pixels to flag a score update.
     min_round_duration_sec:
-        Rounds shorter than this are suppressed.
+        Suppress implausibly short rounds.
     """
 
     def __init__(
         self,
         ratio_key: str = "round_info.timer_pixel_ratio",
+        ct_pixels_key: str = "round_info.ct_score_pixels",
+        t_pixels_key: str = "round_info.t_score_pixels",
         smooth_window: int = _SMOOTH_WINDOW,
         ratio_high: float = _RATIO_HIGH,
         ratio_low: float = _RATIO_LOW,
+        score_change_ratio: float = _SCORE_CHANGE_RATIO,
         min_round_duration_sec: float = 3.0,
     ) -> None:
         self._ratio_key = ratio_key
+        self._ct_key = ct_pixels_key
+        self._t_key = t_pixels_key
         self._smooth_win = max(1, smooth_window)
         self._ratio_high = ratio_high
         self._ratio_low = ratio_low
+        self._score_change = score_change_ratio
         self._min_duration = min_round_duration_sec
 
-        # -- volatile state (reset per video) ---------------------------------
         self._history: deque[float] = deque(maxlen=self._smooth_win)
         self._smoothed_ratio = 0.0
         self._round_counter = 0
         self._in_round = False
         self._last_start_ts: float | None = None
-        self._round_start_fi: int | None = None
         self._absence_count = 0
         self._presence_count = 0
+        # Score tracking: pixel counts from the last confirmed round.
+        self._last_ct_px: int = -1
+        self._last_t_px: int = -1
         self._pending_events: list[GameEvent] = []
 
     # -- EventEngine interface -----------------------------------------------
@@ -76,10 +87,11 @@ class RoundBoundaryDetector(EventEngine):
         self._pending_events.clear()
 
         raw = float(hud_state.values.get(self._ratio_key, 0))
+        ct_px = int(hud_state.values.get(self._ct_key, 0))
+        t_px = int(hud_state.values.get(self._t_key, 0))
         fi = hud_state.frame_index
         ts = hud_state.timestamp_sec
 
-        # Maintain rolling average.
         self._history.append(raw)
         self._smoothed_ratio = sum(self._history) / len(self._history)
 
@@ -87,21 +99,29 @@ class RoundBoundaryDetector(EventEngine):
         timer_absent = self._smoothed_ratio < self._ratio_low
 
         if not self._in_round:
-            # Looking for round start: timer must be consistently present.
             if timer_present:
                 self._presence_count += 1
                 if self._presence_count >= 5:
-                    self._confirm_round_start(fi, ts)
+                    # Dual confirm: timer present AND scores changed.
+                    if self._scores_changed(ct_px, t_px):
+                        self._confirm_round_start(fi, ts, ct_px, t_px)
+                    # Allow first round without score change.
+                    elif self._last_ct_px < 0:
+                        self._confirm_round_start(fi, ts, ct_px, t_px)
             else:
                 self._presence_count = 0
         else:
-            # In round: look for sustained timer absence (scoreboard).
             if timer_absent:
                 self._absence_count += 1
                 if self._absence_count >= 10:
                     self._confirm_round_end(fi, ts)
             else:
                 self._absence_count = max(0, self._absence_count - 1)
+                # Track scores during round for change detection.
+                if ct_px > 0:
+                    self._last_ct_px = ct_px
+                if t_px > 0:
+                    self._last_t_px = t_px
 
         return tuple(self._pending_events)
 
@@ -116,12 +136,27 @@ class RoundBoundaryDetector(EventEngine):
 
     # -- internal ------------------------------------------------------------
 
-    def _confirm_round_start(self, fi: int, ts: float) -> None:
+    def _scores_changed(self, ct_px: int, t_px: int) -> bool:
+        """Return True if either CT or T score pixel count changed significantly."""
+        if self._last_ct_px < 0 or self._last_t_px < 0:
+            return False
+        ct_changed = (
+            abs(ct_px - self._last_ct_px) / max(self._last_ct_px, 1)
+            > self._score_change
+        )
+        t_changed = (
+            abs(t_px - self._last_t_px) / max(self._last_t_px, 1)
+            > self._score_change
+        )
+        return ct_changed or t_changed
+
+    def _confirm_round_start(
+        self, fi: int, ts: float, ct_px: int, t_px: int
+    ) -> None:
         self._round_counter += 1
         rid = f"round_{self._round_counter:03d}"
         self._in_round = True
         self._last_start_ts = ts
-        self._round_start_fi = fi
         self._absence_count = 0
         self._presence_count = 0
         self._pending_events.append(
@@ -130,8 +165,10 @@ class RoundBoundaryDetector(EventEngine):
 
     def _confirm_round_end(self, fi: int, ts: float) -> None:
         rid = f"round_{self._round_counter:03d}"
-        # Suppress implausibly short rounds.
-        if self._last_start_ts is not None and (ts - self._last_start_ts) < self._min_duration:
+        if (
+            self._last_start_ts is not None
+            and (ts - self._last_start_ts) < self._min_duration
+        ):
             self._absence_count = 0
             return
         self._in_round = False
@@ -165,9 +202,10 @@ class RoundBoundaryDetector(EventEngine):
         self._round_counter = 0
         self._in_round = False
         self._last_start_ts = None
-        self._round_start_fi = None
         self._absence_count = 0
         self._presence_count = 0
+        self._last_ct_px = -1
+        self._last_t_px = -1
         self._pending_events.clear()
 
 
@@ -205,7 +243,6 @@ class KillEventDetector(EventEngine):
         self._death_cooldown = death_cooldown_sec
         self._kill_cooldown = kill_cooldown_sec
 
-        # -- volatile state ---------------------------------------------------
         self._kill_counter = 0
         self._death_counter = 0
         self._death_debounce_count = 0
@@ -215,38 +252,28 @@ class KillEventDetector(EventEngine):
         self._last_kill_ts: float | None = None
         self._pending_events: list[GameEvent] = []
 
-    # -- EventEngine interface -----------------------------------------------
-
     def update(
         self, hud_state: HudState, tracks: Sequence[Track] = ()
     ) -> Sequence[GameEvent]:
         self._pending_events.clear()
         ts = hud_state.timestamp_sec
         fi = hud_state.frame_index
-
         self._detect_death(hud_state, fi, ts)
         self._detect_kill(hud_state, fi, ts)
-
         return tuple(self._pending_events)
 
     def finalize(self) -> Sequence[GameEvent]:
         self._reset()
         return ()
 
-    # -- death detection -----------------------------------------------------
-
     def _detect_death(self, state: HudState, fi: int, ts: float) -> None:
         hp = state.values.get(self._hp_key)
-        if not isinstance(hp, (int, float)):
+        if not isinstance(hp, (int, float)) or hp is None:
             return
-        if hp is None:
-            return
-
         in_cooldown = (
             self._last_death_ts is not None
             and (ts - self._last_death_ts) < self._death_cooldown
         )
-
         if hp < self._hp_death_threshold and not in_cooldown:
             self._death_debounce_count += 1
             if self._death_debounce_count >= self._death_debounce:
@@ -258,83 +285,44 @@ class KillEventDetector(EventEngine):
         self._death_counter += 1
         self._last_death_ts = ts
         self._death_debounce_count = 0
-
-        self._pending_events.append(
-            GameEvent(
-                event_id=f"player_death_{self._death_counter:03d}",
-                event_type=EventType.PLAYER_DEATH,
-                start_sec=ts,
-                confidence=0.85,
-                evidence=[
-                    Evidence(
-                        frame_index=fi,
-                        timestamp_sec=ts,
-                        source=f"KillEventDetector.{self._hp_key}",
-                    )
-                ],
-                attributes={
-                    "death_index": self._death_counter,
-                    "hp_key": self._hp_key,
-                },
-            )
-        )
-
-    # -- kill detection ------------------------------------------------------
+        self._pending_events.append(GameEvent(
+            event_id=f"player_death_{self._death_counter:03d}",
+            event_type=EventType.PLAYER_DEATH, start_sec=ts, confidence=0.85,
+            evidence=[Evidence(frame_index=fi, timestamp_sec=ts, source=f"KillEventDetector.{self._hp_key}")],
+            attributes={"death_index": self._death_counter, "hp_key": self._hp_key},
+        ))
 
     def _detect_kill(self, state: HudState, fi: int, ts: float) -> None:
         current = bool(state.values.get(self._kf_key, False))
-
         in_cooldown = (
             self._last_kill_ts is not None
             and (ts - self._last_kill_ts) < self._kill_cooldown
         )
-
-        # Rising edge: False -> True starts observation
         if current and not self._kill_feed_was_active and not in_cooldown:
             self._kill_rising_count = 1
         elif current and self._kill_rising_count > 0:
             self._kill_rising_count += 1
         else:
             self._kill_rising_count = 0
-
         if self._kill_rising_count >= self._kill_debounce:
             self._emit_kill(fi, ts)
-
         self._kill_feed_was_active = current
 
     def _emit_kill(self, fi: int, ts: float) -> None:
         self._kill_counter += 1
         self._last_kill_ts = ts
         self._kill_rising_count = 0
-
-        self._pending_events.append(
-            GameEvent(
-                event_id=f"player_kill_{self._kill_counter:03d}",
-                event_type=EventType.PLAYER_KILL,
-                start_sec=ts,
-                confidence=0.55,
-                evidence=[
-                    Evidence(
-                        frame_index=fi,
-                        timestamp_sec=ts,
-                        source=f"KillEventDetector.{self._kf_key}",
-                    )
-                ],
-                attributes={
-                    "kill_index": self._kill_counter,
-                    "kf_key": self._kf_key,
-                },
-            )
-        )
-
-    # -- internal ------------------------------------------------------------
+        self._pending_events.append(GameEvent(
+            event_id=f"player_kill_{self._kill_counter:03d}",
+            event_type=EventType.PLAYER_KILL, start_sec=ts, confidence=0.55,
+            evidence=[Evidence(frame_index=fi, timestamp_sec=ts, source=f"KillEventDetector.{self._kf_key}")],
+            attributes={"kill_index": self._kill_counter, "kf_key": self._kf_key},
+        ))
 
     def _reset(self) -> None:
-        self._kill_counter = 0
-        self._death_counter = 0
+        self._kill_counter = self._death_counter = 0
         self._death_debounce_count = 0
         self._kill_feed_was_active = False
         self._kill_rising_count = 0
-        self._last_death_ts = None
-        self._last_kill_ts = None
+        self._last_death_ts = self._last_kill_ts = None
         self._pending_events.clear()
