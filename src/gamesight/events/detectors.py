@@ -35,8 +35,8 @@ class RoundBoundaryDetector(EventEngine):
     def __init__(
         self,
         state_key: str = "round_info.round_active",
-        debounce_frames: int = 8,
-        min_round_duration_sec: float = 15.0,
+        debounce_frames: int = 3,
+        min_round_duration_sec: float = 3.0,
     ) -> None:
         if debounce_frames < 1:
             raise ValueError("debounce_frames must be >= 1")

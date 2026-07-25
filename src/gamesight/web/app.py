@@ -217,8 +217,10 @@ if run_clicked:
                 extractor = OpenCVScreenshotExtractor(max_screenshots=30)
                 analysis = st.session_state.get("analysis_obj")
                 if analysis is not None:
+                    # Skip freeze-time events (< 12s after round start).
                     important = [e for r in analysis.rounds for e in r.events
-                                 if e.event_type.value in ("player_kill", "player_death", "enemy_first_visible")]
+                                 if e.event_type.value in ("player_kill", "player_death")
+                                 and (e.start_sec - r.start_sec) > 12.0]
                     st.session_state["screenshots"] = extractor.extract(video_path, important)
             finally: Path(video_path).unlink(missing_ok=True)
         st.session_state["result"] = result; st.rerun()

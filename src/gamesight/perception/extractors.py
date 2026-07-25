@@ -15,8 +15,6 @@ from numpy.typing import NDArray
 
 
 # -- colour constants (BGR) ---------------------------------------------------
-# CS2 HUD colours are intentionally saturated and consistent across
-# resolutions, making BGR thresholding reliable for UI elements.
 
 _HP_GREEN_LOW = np.array([30, 140, 0], dtype=np.uint8)
 _HP_GREEN_HIGH = np.array([120, 255, 120], dtype=np.uint8)
@@ -30,7 +28,7 @@ _ARMOUR_BLUE_HIGH = np.array([255, 160, 80], dtype=np.uint8)
 _CROSSHAIR_GREEN_LOW = np.array([30, 150, 0], dtype=np.uint8)
 _CROSSHAIR_GREEN_HIGH = np.array([120, 255, 120], dtype=np.uint8)
 
-_WHITE_TEXT_LOW = np.array([190, 190, 190], dtype=np.uint8)
+_WHITE_TEXT_LOW = np.array([200, 200, 200], dtype=np.uint8)
 _WHITE_TEXT_HIGH = np.array([255, 255, 255], dtype=np.uint8)
 
 _YELLOW_TEXT_LOW = np.array([0, 180, 180], dtype=np.uint8)
@@ -47,6 +45,9 @@ _ACTIVITY_THRESHOLD = 0.005
 # Minimum number of bright pixels needed to declare HUD text visible.
 _TEXT_PIXEL_THRESHOLD = 10
 
+# Timer zone: fraction of bright-white pixels that indicates timer is visible.
+_TIMER_ACTIVE_RATIO = 0.008
+
 
 class RegionExtractor(ABC):
     """Contract for a single-region HUD value extractor."""
@@ -62,18 +63,9 @@ class RegionExtractor(ABC):
 
 
 # -- crosshair ----------------------------------------------------------------
-# The crosshair sits dead-centre and is drawn as a few bright lines with
-# a small gap.  We detect it by checking whether the centre region
-# contains high-contrast structure (variance significantly above noise).
-
 
 class CrosshairExtractor(RegionExtractor):
-    """Detect crosshair presence via central-region intensity variance.
-
-    The crosshair introduces sharp transitions (bright lines on varied
-    background), so a higher standard deviation in the centre crop is a
-    strong signal.
-    """
+    """Detect crosshair presence via central-region intensity variance."""
 
     _VARIANCE_THRESHOLD = 25.0
 
@@ -95,21 +87,12 @@ class CrosshairExtractor(RegionExtractor):
 
 
 # -- HP bar -------------------------------------------------------------------
-# The HP bar fills left-to-right with saturated green; it turns red when
-# HP drops below ~25.  Armour is a thinner blue bar above the HP bar.
-# We count green (or red) pixels in the bottom portion of the region and
-# estimate HP as the ratio of coloured pixels to the bar's expected width.
-
 
 class HPBarExtractor(RegionExtractor):
-    """Estimate HP and armour presence from the bottom-centre HUD bar.
+    """Estimate HP and armour presence from the bottom-centre HUD bar."""
 
-    The extractor scans the lower half of the region for green (HP) or
-    red (low HP) pixels and the upper portion for blue (armour) pixels.
-    """
-
-    _HP_BAR_HEIGHT_FRAC = 0.45  # bottom 45 % of region contains the HP bar
-    _ARMOUR_FRAC = 0.25         # armour bar sits roughly 25 % from top of region
+    _HP_BAR_HEIGHT_FRAC = 0.45
+    _ARMOUR_FRAC = 0.25
 
     def extract(
         self,
@@ -121,7 +104,6 @@ class HPBarExtractor(RegionExtractor):
         if h == 0 or w == 0:
             return {"hp": 0, "hp_low": False, "armour": False}
 
-        # HP bar — bottom portion
         hp_slice = region_image[int(h * (1 - self._HP_BAR_HEIGHT_FRAC)):, :, :]
         green_mask = cv_in_range(hp_slice, _HP_GREEN_LOW, _HP_GREEN_HIGH)
         red_mask = cv_in_range(hp_slice, _HP_RED_LOW, _HP_RED_HIGH)
@@ -129,14 +111,12 @@ class HPBarExtractor(RegionExtractor):
         green_px = int(np.sum(green_mask > 0))
         red_px = int(np.sum(red_mask > 0))
 
-        # The bar width is roughly the region width; estimate HP from fill ratio.
         bar_height = hp_slice.shape[0]
         expected_max_pixels = w * bar_height
         hp_ratio = (green_px + red_px) / max(expected_max_pixels, 1)
         hp = min(100, max(0, int(round(hp_ratio * 100))))
         hp_low = red_px > green_px
 
-        # Armour bar — upper portion
         armour_slice = region_image[: int(h * self._ARMOUR_FRAC), :, :]
         blue_mask = cv_in_range(armour_slice, _ARMOUR_BLUE_LOW, _ARMOUR_BLUE_HIGH)
         armour = int(np.sum(blue_mask > 0)) > _TEXT_PIXEL_THRESHOLD
@@ -145,9 +125,6 @@ class HPBarExtractor(RegionExtractor):
 
 
 # -- kill feed ----------------------------------------------------------------
-# The kill feed at top-right is a stack of bright (white/yellow) text
-# lines.  We detect activity by counting bright pixels.
-
 
 class KillFeedExtractor(RegionExtractor):
     """Detect kill-feed activity by counting bright text pixels."""
@@ -172,13 +149,9 @@ class KillFeedExtractor(RegionExtractor):
 
 
 # -- money --------------------------------------------------------------------
-# Money text at bottom-left is rendered in a light green / yellow tone.
-# OCR will eventually read the actual value; for now we only report
-# whether the text is present.
-
 
 class MoneyExtractor(RegionExtractor):
-    """Detect whether the money text is visible (OCR-ready in a future sprint)."""
+    """Detect whether the money text is visible."""
 
     def extract(
         self,
@@ -194,14 +167,20 @@ class MoneyExtractor(RegionExtractor):
 
 
 # -- round info ---------------------------------------------------------------
-# The round-info bar (timer + scores) at top-centre contains bright text
-# when a round is active.  Between rounds the region is mostly dark.
-
 
 class RoundInfoExtractor(RegionExtractor):
-    """Extract round info: timer + score colours.
+    """Extract round info: timer activity + score colours.
 
-    Top half = timer (white), bottom half = scores (CT blue, T yellow).
+    The round_info region at top-centre contains:
+      - Top ~60%: white countdown timer digits on dark background
+      - Bottom ~40%: CT score (blue) and T score (yellow)
+
+    Timer detection uses a pixel-ratio threshold instead of an absolute
+    pixel count, which is more robust against HUD variations.
+
+    Between rounds the scoreboard replaces the timer, causing a
+    significant drop in bright-white pixel density that serves as a
+    reliable round-transition signal.
     """
 
     def extract(
@@ -211,21 +190,33 @@ class RoundInfoExtractor(RegionExtractor):
         timestamp_sec: float,
     ) -> dict[str, object]:
         if region_image.size == 0:
-            return {"round_active": False, "scores_visible": False,
-                    "ct_score_present": False, "t_score_present": False}
+            return {
+                "round_active": False, "timer_visible": False,
+                "ct_score_present": False, "t_score_present": False,
+                "scores_visible": False,
+                "timer_pixel_ratio": 0.0,
+            }
 
         h = region_image.shape[0]
-        timer_zone = region_image[: h // 2, :]
-        white_mask = cv_in_range(timer_zone, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
-        timer_active = int(np.sum(white_mask > 0)) > _TEXT_PIXEL_THRESHOLD
 
-        score_zone = region_image[h // 2:, :]
+        # Timer zone: top ~60% of the round_info strip.
+        timer_zone = region_image[: int(h * 0.60), :]
+        timer_pixels = timer_zone.size // 3 if timer_zone.size > 0 else 1
+        white_mask = cv_in_range(timer_zone, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
+        white_count = int(np.sum(white_mask > 0))
+        timer_ratio = white_count / max(timer_pixels, 1)
+        # Timer is "active" when bright-white pixel ratio exceeds threshold.
+        timer_active = timer_ratio > _TIMER_ACTIVE_RATIO
+
+        # Score zone: bottom ~40%.
+        score_zone = region_image[int(h * 0.60):, :]
         ct_present = int(np.sum(cv_in_range(score_zone, _CT_SCORE_LOW, _CT_SCORE_HIGH) > 0)) > _SCORE_PIXEL_MIN
         t_present = int(np.sum(cv_in_range(score_zone, _T_SCORE_LOW, _T_SCORE_HIGH) > 0)) > _SCORE_PIXEL_MIN
 
         return {
             "round_active": timer_active,
             "timer_visible": timer_active,
+            "timer_pixel_ratio": round(timer_ratio, 5),
             "ct_score_present": ct_present,
             "t_score_present": t_present,
             "scores_visible": ct_present and t_present,
