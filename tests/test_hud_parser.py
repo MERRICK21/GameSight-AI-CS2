@@ -95,8 +95,8 @@ class CS2HudParserIntegrationTests(TestCase):
     def test_armour_blue_detected(self) -> None:
         frame = self._blank_frame()
         blue = (160, 100, 20)
-        # Armour zone is top 25 % of player_status: rows 955..984
-        frame[955:984, 556:1362, :] = blue
+        # New player_status at 1920: x=547,y=855,w=826,h=225. Armour top 25%: rows 855..911
+        frame[870:900, 600:1300, :] = blue
         state = self.parser.parse(frame, 0, 0.0)
         self.assertTrue(state.values["player_status.armour"])
 
@@ -119,9 +119,9 @@ class CS2HudParserIntegrationTests(TestCase):
 
     def test_round_info_active_detected(self) -> None:
         frame = self._blank_frame()
-        # round_info region at 1920x1080: x=652, y=5, w=614, h=91
         white = (255, 255, 255)
-        frame[20:40, 700:900, :] = white
+        # New round_info at 1920: x=908,y=3,w=104,h=84. Timer zone top 60%: y=3..53
+        frame[15:40, 930:990, :] = white
         state = self.parser.parse(frame, 0, 0.0)
         self.assertTrue(state.values["round_info.round_active"])
 

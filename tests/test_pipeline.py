@@ -63,10 +63,11 @@ def _hp_frame(index: int, ts: float) -> VideoFrame:
     img = np.zeros((1080, 1920, 3), dtype=np.uint8)
     green = (50, 220, 50)
     blue = (160, 100, 20)
-    # HP bar zone: player_status at [556..1362, 955..1073]
-    img[1020:1073, 556:1362, :] = green
-    # Armour zone
-    img[955:984, 556:1362, :] = blue
+    # New player_status at 1920: x=547,y=855,w=826,h=225
+    # HP bar (bottom 45%): rows ~980..1080
+    img[990:1070, 600:1300, :] = green
+    # Armour (top 25%): rows ~855..911
+    img[870:900, 600:1300, :] = blue
     return VideoFrame(frame_index=index, timestamp_sec=ts, image=img)
 
 
@@ -85,8 +86,9 @@ def _round_info_frame(index: int, ts: float) -> VideoFrame:
     """Frame with visible round timer."""
     img = np.zeros((1080, 1920, 3), dtype=np.uint8)
     white = (255, 255, 255)
-    # round_info region: [652..1266, 5..96]
-    img[20:40, 700:900, :] = white
+    # New round_info at 1920: x=908,y=3,w=104,h=84
+    # Timer zone (top 60%): y=3..53, x=908..1012
+    img[15:40, 930:990, :] = white
     return VideoFrame(frame_index=index, timestamp_sec=ts, image=img)
 
 

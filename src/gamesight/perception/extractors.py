@@ -67,7 +67,7 @@ class RegionExtractor(ABC):
 class CrosshairExtractor(RegionExtractor):
     """Detect crosshair presence via central-region intensity variance."""
 
-    _VARIANCE_THRESHOLD = 25.0
+    _VARIANCE_THRESHOLD = 12.0  # lowered for better sensitivity on 2K
 
     def extract(
         self,
@@ -137,7 +137,11 @@ class KillFeedExtractor(RegionExtractor):
     ) -> dict[str, object]:
         white_mask = cv_in_range(region_image, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
         yellow_mask = cv_in_range(region_image, _YELLOW_TEXT_LOW, _YELLOW_TEXT_HIGH)
+        # Exclude green net_graph text (ping/fps) -- common in POV recordings.
+        green_mask = cv_in_range(region_image, np.array([0, 120, 0], dtype=np.uint8), np.array([80, 255, 80], dtype=np.uint8))
         bright_pixels = int(np.sum(white_mask > 0)) + int(np.sum(yellow_mask > 0))
+        green_px = int(np.sum(green_mask > 0))
+        bright_pixels = max(0, bright_pixels - green_px)
 
         total = max(region_image.size // 3, 1)
         fraction = bright_pixels / total
