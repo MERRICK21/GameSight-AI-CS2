@@ -25,10 +25,10 @@ CS2_16X9_REGIONS: list[HudRegion] = [
               x_norm=0.000, y_norm=0.861, w_norm=0.137, h_norm=0.139,
               description="Current money counter at bottom-left"),
     HudRegion(name="player_status", anchor="bottom_center",
-              x_norm=0.285, y_norm=0.792, w_norm=0.451, h_norm=0.208,
+              x_norm=0.250, y_norm=0.792, w_norm=0.500, h_norm=0.208,
               description="HP, armour, kill count, and ammo at bottom-centre"),
     HudRegion(name="weapon_utility", anchor="bottom_right",
-              x_norm=0.883, y_norm=0.653, w_norm=0.123, h_norm=0.347,
+              x_norm=0.859, y_norm=0.573, w_norm=0.141, h_norm=0.427,
               description="Weapon name, ammo reserve, utility icons at bottom-right"),
 ]
 CS2_STANDARD_16X9 = HudLayoutProfile(name="cs2_standard_16x9", game="cs2",
