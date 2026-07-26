@@ -119,14 +119,15 @@ class RoundBoundaryDetectorBasicTests(TestCase):
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001)
         events: list = []
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
         _assert_event(self, events[0], EventType.ROUND_START, "round_001")
         for i in range(5, 100):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
-        for i in range(100, 111):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.0))
+        # Timer absent + scores change -> round ends.
+        for i in range(100, 116):
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 2)
         _assert_event(self, events[1], EventType.ROUND_END, "round_001")
 
@@ -140,18 +141,18 @@ class RoundBoundaryDetectorBasicTests(TestCase):
         _assert_event(self, events[0], EventType.ROUND_START, "round_001")
         for i in range(5, 110):
             events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
-        for i in range(110, 121):
+        for i in range(110, 126):
             events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=0, t_px=0))
         self.assertEqual(len(events), 2)
         _assert_event(self, events[1], EventType.ROUND_END, "round_001")
         # Round 2: scores changed (200 vs 100), timer reappears -> new round.
-        for i in range(121, 126):
+        for i in range(126, 131):
             events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=200, t_px=150))
         self.assertEqual(len(events), 3)
         _assert_event(self, events[2], EventType.ROUND_START, "round_002")
-        for i in range(126, 230):
+        for i in range(131, 235):
             events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=200, t_px=150))
-        for i in range(230, 241):
+        for i in range(235, 251):
             events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=0, t_px=0))
         self.assertEqual(len(events), 4)
         _assert_event(self, events[3], EventType.ROUND_END, "round_002")
@@ -166,17 +167,22 @@ class RoundBoundaryDetectorBasicTests(TestCase):
             events += detector.update(_ratio_state(i, i * 0.5, 0.01))
         self.assertEqual(len(events), 1)
 
-    def test_round_end_requires_10_absence_frames(self) -> None:
+    def test_round_end_requires_absence_and_score_change(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001)
         events: list = []
+        # Round 1 start (first round exemption, no prior scores).
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
-        for i in range(5, 14):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.0))
-        self.assertEqual(len(events), 1, "9 absence frames not enough")
-        events += detector.update(_ratio_state(14, 7.0, 0.0))
+        # Timer absent for 15 frames but scores unchanged -> no round end (C4 planted scenario).
+        for i in range(5, 25):
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=100, t_px=100))
+        self.assertEqual(len(events), 1, "Timer absent, scores same -> no end")
+        # Scores change -> round ends.
+        for i in range(25, 41):
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 2)
+        _assert_event(self, events[1], EventType.ROUND_END, "round_001")
 
 
 class RoundBoundaryDetectorMinDurationTests(TestCase):
@@ -185,31 +191,32 @@ class RoundBoundaryDetectorMinDurationTests(TestCase):
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001, min_round_duration_sec=5.0)
         events: list = []
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.1, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.1, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
+        # Scores change but round too short.
         for i in range(5, 25):
-            events += detector.update(_ratio_state(i, i * 0.1, 0.0))
+            events += detector.update(_ratio_state(i, i * 0.1, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 1, "Short round suppressed")
 
     def test_long_round_not_suppressed(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001, min_round_duration_sec=1.0)
         events: list = []
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
         for i in range(5, 20):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
-        for i in range(20, 31):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.0))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
+        for i in range(20, 36):
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 2)
 
     def test_min_duration_zero_allows_all(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001, min_round_duration_sec=0.0)
         events: list = []
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.1, 0.01))
-        for i in range(5, 16):
-            events += detector.update(_ratio_state(i, i * 0.1, 0.0))
+            events += detector.update(_ratio_state(i, i * 0.1, 0.01, ct_px=100, t_px=100))
+        for i in range(5, 21):
+            events += detector.update(_ratio_state(i, i * 0.1, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 2)
 
 
@@ -228,14 +235,14 @@ class RoundBoundaryDetectorSmoothingTests(TestCase):
             events += detector.update(_ratio_state(i, i * 0.5, 0.01))
         self.assertEqual(len(events), 1, "Flicker filtered by smoothing")
 
-    def test_sustained_absence_ends_round(self) -> None:
+    def test_sustained_absence_with_score_change_ends_round(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001)
         events: list = []
         for i in range(5):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.01))
+            events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         self.assertEqual(len(events), 1)
-        for i in range(5, 16):
-            events += detector.update(_ratio_state(i, i * 0.5, 0.0))
+        for i in range(5, 21):
+            events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 2)
 
     def test_mid_range_ratio_ignored(self) -> None:
@@ -254,7 +261,7 @@ class RoundBoundaryDetectorFinalizeTests(TestCase):
     def test_finalize_mid_round_emits_round_end(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001)
         for i in range(5):
-            detector.update(_ratio_state(i, i * 0.5, 0.01))
+            detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
         final = detector.finalize()
         self.assertEqual(len(final), 1)
         self.assertEqual(final[0].event_type, EventType.ROUND_END)
