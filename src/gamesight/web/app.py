@@ -205,38 +205,100 @@ def _draw_hud_debug(pil_img, profile) -> Image.Image:
         label_y = y - th - 4 if y > th + 4 else y2 + 2
         draw.rectangle([x, label_y, x + tw + 6, label_y + th + 4], fill=color)
         draw.text((x + 3, label_y + 2), label, fill=(0, 0, 0), font=font)
-    return img# Sidebar
+    return img
+
+# Sidebar
 with st.sidebar:
-    st.title(f"\U0001f3af {_t('app.title')}"); st.caption(_t("app.subtitle")); st.divider()
-    lang_labels = {"en": "English", "zh-CN": "\u7b80\u4f53\u4e2d\u6587"}
+    st.title(f"🎯 {_t('app.title')}"); st.caption(_t("app.subtitle"))
+    lang_labels = {"en": "English", "zh-CN": "简体中文"}
     lang = st.selectbox(_t("sidebar.language"), options=["en", "zh-CN"],
                         format_func=lambda x: lang_labels[x], index=0 if st.session_state["locale"] == "en" else 1)
     if lang != st.session_state["locale"]: st.session_state["locale"] = lang; st.rerun()
     st.divider()
-    st.subheader(f"\U0001f4c1 {_t('sidebar.input')}")
-    use_demo = st.checkbox(_t("sidebar.demo_mode"), value=False, help=_t("sidebar.demo_help"))
-    uploaded = None
-    if not use_demo:
-        uploaded = st.file_uploader(_t("sidebar.upload_label"), type=["mp4", "mov", "mkv"], help=_t("sidebar.upload_help"))
-    pf = st.checkbox(_t("sidebar.player_filter"), value=st.session_state.get("player_filter", False), help=_t("sidebar.player_filter_help"))
-    st.session_state["player_filter"] = pf
-    if pf:
-        pn = st.text_input(_t("sidebar.player_name"), value=st.session_state.get("player_name", ""), help=_t("sidebar.player_name_help"))
-        st.session_state["player_name"] = pn; st.caption(_t("player_filter.active"))
+    mode = st.radio("📋 Mode", ["📁 Video Analysis", "📸 Screenshot Debug"],
+                    index=0 if st.session_state.get("mode", "video") == "video" else 1)
+    new_mode = "video" if "Video" in mode else "screenshot"
+    if new_mode != st.session_state.get("mode"): st.session_state["mode"] = new_mode; st.rerun()
     st.divider()
-    st.subheader(f"\U0001f9e0 {_t("sidebar.ai_features")}")
-    use_ocr = st.checkbox(_t("sidebar.ocr_label"), value=st.session_state.get("use_ocr", False),
-                          help=_t("sidebar.ocr_help"))
-    st.session_state["use_ocr"] = use_ocr
-    use_yolo = st.checkbox(_t("sidebar.yolo_label"), value=st.session_state.get("use_yolo", False),
-                           help=_t("sidebar.yolo_help"))
-    st.session_state["use_yolo"] = use_yolo
-    st.divider()
-    st.subheader(f"\u2699\ufe0f {_t('sidebar.settings')}")
-    sample_fps = st.slider(_t("sidebar.sample_fps"), 1, 30, 10, help=_t("sidebar.sample_fps_help"))
-    st.divider(); st.caption(f"{_t('app.version')} | 395 tests")
+    if st.session_state.get("mode") == "video":
+        st.subheader(f"📁 {_t('sidebar.input')}")
+        use_demo = st.checkbox(_t("sidebar.demo_mode"), value=False, help=_t("sidebar.demo_help"))
+        uploaded = None
+        if not use_demo:
+            uploaded = st.file_uploader(_t("sidebar.upload_label"), type=["mp4", "mov", "mkv"], help=_t("sidebar.upload_help"))
+        pf = st.checkbox(_t("sidebar.player_filter"), value=st.session_state.get("player_filter", False), help=_t("sidebar.player_filter_help"))
+        st.session_state["player_filter"] = pf
+        if pf:
+            pn = st.text_input(_t("sidebar.player_name"), value=st.session_state.get("player_name", ""), help=_t("sidebar.player_name_help"))
+            st.session_state["player_name"] = pn; st.caption(_t("player_filter.active"))
+        st.divider()
+        st.subheader(f"🧠 {_t("sidebar.ai_features")}")
+        use_ocr = st.checkbox(_t("sidebar.ocr_label"), value=st.session_state.get("use_ocr", False), help=_t("sidebar.ocr_help"))
+        st.session_state["use_ocr"] = use_ocr
+        use_yolo = st.checkbox(_t("sidebar.yolo_label"), value=st.session_state.get("use_yolo", False), help=_t("sidebar.yolo_help"))
+        st.session_state["use_yolo"] = use_yolo
+        st.divider()
+        st.subheader(f"⚙️ {_t('sidebar.settings')}")
+        sample_fps = st.slider(_t("sidebar.sample_fps"), 1, 30, 10, help=_t("sidebar.sample_fps_help"))
+    else:
+        use_demo = False; uploaded = None; use_ocr = False; use_yolo = False; pf = False; sample_fps = 10
+        st.subheader("📸 Upload Screenshots")
+        debug_files = st.file_uploader("Select CS2 screenshots", type=["jpg", "jpeg", "png"],
+                                       accept_multiple_files=True, key="debug_upload")
+        if debug_files:
+            st.session_state["debug_screenshots"] = debug_files
+            st.caption(f"{len(debug_files)} screenshot(s) loaded")
+    st.divider(); st.caption(f"{_t('app.version')} | 388 tests")
 
-# Run
+if st.session_state.get("mode") == "screenshot":
+    # ---- Screenshot Debug Mode ----
+    debug_files = st.session_state.get("debug_screenshots", [])
+    if debug_files:
+        if st.button("🔍 Analyze Screenshots", type="primary"):
+            with st.spinner(_t("loading")):
+                st.session_state["debug_results"] = []
+                parser = CS2HudParser(CS2_STANDARD_16X9, {
+                    "crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
+                    "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(),
+                    "round_info": RoundInfoExtractor(),
+                })
+                analyzer = LiveAnalyzer(parser, _loader())
+                for f in debug_files:
+                    pil = Image.open(f).convert("RGB")
+                    frame = np.array(pil)[:, :, ::-1].copy()
+                    state = parser.parse(frame, 0, 0.0)
+                    advice = analyzer.analyze(frame)
+                    st.session_state["debug_results"].append({
+                        "name": f.name, "image": pil, "state": state,
+                        "advice": advice, "frame": frame,
+                    })
+            st.rerun()
+    debug_results = st.session_state.get("debug_results", [])
+    if debug_results:
+        for i, dr in enumerate(debug_results):
+            st.subheader(f"📸 {dr['name']}")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                debug_img = _draw_hud_debug(dr["image"], CS2_STANDARD_16X9)
+                st.image(debug_img, caption="HUD Regions", use_container_width=True)
+            with c2:
+                st.subheader("HUD Values")
+                vals = dr["state"].values
+                st.json({k: v for k, v in sorted(vals.items()) if isinstance(v, (str, int, float, bool, type(None)))})
+                st.divider()
+                st.subheader("🎯 Advice")
+                a = dr["advice"]
+                st.metric("Status", a.status)
+                st.markdown(f"**Action:** {a.next_action}")
+                st.caption(f"Confidence: {a.confidence:.2f}")
+                for tip in a.tips:
+                    st.markdown(f"- {tip}")
+            st.divider()
+    elif not debug_files:
+        st.info("Switch to Screenshot Debug mode in the sidebar, upload screenshots, then click Analyze.")
+    st.stop()
+
+# ---- Video Analysis Mode ----
 col1, col2 = st.columns([1, 3])
 with col1:
     can_run = use_demo or (uploaded is not None)
