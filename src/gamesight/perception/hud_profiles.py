@@ -10,7 +10,7 @@ from gamesight.domain.models import HudLayoutProfile, HudRegion
 
 CS2_16X9_REGIONS: list[HudRegion] = [
     HudRegion(name="minimap", anchor="top_left",
-              x_norm=0.000, y_norm=0.000, w_norm=0.234, h_norm=0.312,
+              x_norm=0.000, y_norm=0.000, w_norm=0.257, h_norm=0.343,
               description="Radar mini-map in the top-left corner"),
     HudRegion(name="round_info", anchor="top_center",
               x_norm=0.473, y_norm=0.003, w_norm=0.054, h_norm=0.078,
@@ -25,10 +25,10 @@ CS2_16X9_REGIONS: list[HudRegion] = [
               x_norm=0.000, y_norm=0.861, w_norm=0.137, h_norm=0.139,
               description="Current money counter at bottom-left"),
     HudRegion(name="player_status", anchor="bottom_center",
-              x_norm=0.285, y_norm=0.792, w_norm=0.430, h_norm=0.208,
+              x_norm=0.285, y_norm=0.792, w_norm=0.451, h_norm=0.208,
               description="HP, armour, kill count, and ammo at bottom-centre"),
     HudRegion(name="weapon_utility", anchor="bottom_right",
-              x_norm=0.883, y_norm=0.653, w_norm=0.117, h_norm=0.347,
+              x_norm=0.883, y_norm=0.653, w_norm=0.123, h_norm=0.347,
               description="Weapon name, ammo reserve, utility icons at bottom-right"),
 ]
 CS2_STANDARD_16X9 = HudLayoutProfile(name="cs2_standard_16x9", game="cs2",

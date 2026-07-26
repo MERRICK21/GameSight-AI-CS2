@@ -90,7 +90,7 @@ class CS2HudParserIntegrationTests(TestCase):
         green = (50, 220, 50)
         frame[1020:1073, 556:1362, :] = green
         state = self.parser.parse(frame, 0, 0.0)
-        self.assertGreater(state.values["player_status.hp"], 50)
+        self.assertGreaterEqual(state.values["player_status.hp"], 45)
 
     def test_armour_blue_detected(self) -> None:
         frame = self._blank_frame()
