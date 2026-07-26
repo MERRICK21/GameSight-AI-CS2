@@ -92,13 +92,30 @@ class HPBarExtractor(RegionExtractor):
     """Estimate HP, armour, and ammo from the bottom-centre HUD bar.
 
     Layout (left to right): armour+HP (25%) | kills/name (50%) | ammo (25%)
+
+    HP detection uses TWO signals:
+      1. White HP number (large bright digit above the bar)
+      2. Coloured bar strip (green at high HP, red at low HP)
+    Either signal alone is enough to confirm HP presence.
     """
 
-    _HPAC_END = 0.25           # armour + HP in left 25%
-    _AMMO_START = 0.75         # ammo in right 25%
+    _HPAC_END = 0.25
+    _AMMO_START = 0.75
     _HP_BAND_TOP = 0.25
-    _HP_BAND_BOTTOM = 0.65
+    _HP_BAND_BOTTOM = 0.70
     _ARMOUR_TOP_FRAC = 0.35
+    # Min coloured pixels to consider bar present (very low, bar is thin).
+    _BAR_PX_MIN = 30
+    # Min white pixels for HP number detection.
+    _NUM_PX_MIN = 20
+
+    # Wide colour ranges to handle custom HUD colours.
+    _GREEN_WIDE_LOW  = np.array([20, 100, 0], dtype=np.uint8)
+    _GREEN_WIDE_HIGH = np.array([140, 255, 140], dtype=np.uint8)
+    _RED_WIDE_LOW    = np.array([0, 0, 100], dtype=np.uint8)
+    _RED_WIDE_HIGH   = np.array([120, 120, 255], dtype=np.uint8)
+    _BLUE_WIDE_LOW   = np.array([80, 30, 0], dtype=np.uint8)
+    _BLUE_WIDE_HIGH  = np.array([255, 200, 120], dtype=np.uint8)
 
     def extract(
         self,
@@ -112,26 +129,45 @@ class HPBarExtractor(RegionExtractor):
 
         hpac_x2 = int(w * self._HPAC_END)
 
-        # HP bar: thin band in the left 25% (armour+HP zone).
+        # -- HP detection: number (white) + bar (coloured) -------------------
         hp_slice = region_image[int(h * self._HP_BAND_TOP): int(h * self._HP_BAND_BOTTOM), :hpac_x2, :]
-        green_mask = cv_in_range(hp_slice, _HP_GREEN_LOW, _HP_GREEN_HIGH)
-        red_mask = cv_in_range(hp_slice, _HP_RED_LOW, _HP_RED_HIGH)
 
+        # White number detection.
+        white_mask = cv_in_range(hp_slice, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
+        white_px = int(np.sum(white_mask > 0))
+
+        # Coloured bar detection (wide ranges for custom HUD colours).
+        green_mask = cv_in_range(hp_slice, self._GREEN_WIDE_LOW, self._GREEN_WIDE_HIGH)
+        red_mask   = cv_in_range(hp_slice, self._RED_WIDE_LOW, self._RED_WIDE_HIGH)
         green_px = int(np.sum(green_mask > 0))
         red_px = int(np.sum(red_mask > 0))
-        coloured = green_px + red_px
 
-        bar_pixels = hp_slice.shape[0] * hp_slice.shape[1]
-        hp_ratio = coloured / max(bar_pixels, 1)
-        hp = min(100, max(0, int(round(hp_ratio * 100))))
-        hp_low = red_px > green_px
+        hp_present = white_px > self._NUM_PX_MIN or (green_px + red_px) > self._BAR_PX_MIN
 
-        # Armour: top portion of left 25%.
+        if hp_present:
+            total_colour = green_px + red_px
+            if total_colour > 0:
+                bar_pixels = hp_slice.shape[0] * hp_slice.shape[1]
+                fill_ratio = total_colour / max(bar_pixels, 1)
+                hp = min(100, max(1, int(round(fill_ratio * 100))))
+                hp_low = red_px > green_px
+            else:
+                hp = 50
+                hp_low = False
+        else:
+            hp = 0
+            hp_low = False
+
+        # -- Armour: top-left zone, wide blue range --------------------------
         armour_slice = region_image[: int(h * self._ARMOUR_TOP_FRAC), :hpac_x2, :]
-        blue_mask = cv_in_range(armour_slice, _ARMOUR_BLUE_LOW, _ARMOUR_BLUE_HIGH)
-        armour = int(np.sum(blue_mask > 0)) > _TEXT_PIXEL_THRESHOLD
+        blue_mask = cv_in_range(armour_slice, self._BLUE_WIDE_LOW, self._BLUE_WIDE_HIGH)
+        armour_px = int(np.sum(blue_mask > 0))
+        # Also check for white content (armour number outline).
+        armour_white = cv_in_range(armour_slice, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
+        armour_white_px = int(np.sum(armour_white > 0))
+        armour = armour_px > 15 or armour_white_px > 20
 
-        # Ammo: right 25%.
+        # -- Ammo: right 25%, yellow digits -----------------------------------
         ammo_x1 = int(w * self._AMMO_START)
         ammo_slice = region_image[:, ammo_x1:, :]
         yellow_mask = cv_in_range(ammo_slice, _YELLOW_TEXT_LOW, _YELLOW_TEXT_HIGH)
