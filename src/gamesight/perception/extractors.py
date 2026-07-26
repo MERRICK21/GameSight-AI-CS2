@@ -89,9 +89,15 @@ class CrosshairExtractor(RegionExtractor):
 # -- HP bar -------------------------------------------------------------------
 
 class HPBarExtractor(RegionExtractor):
-    """Estimate HP and armour presence from the bottom-centre HUD bar."""
+    """Estimate HP and armour from the bottom-centre HUD bar.
+    
+    The HP bar is a thin horizontal strip with a white number above it.
+    Ammo (yellow digits) sits on the right side of the same region.
+    """
 
-    _HP_BAR_HEIGHT_FRAC = 0.45
+    _HP_BAND_TOP = 0.35
+    _HP_BAND_BOTTOM = 0.55
+    _HP_LEFT_FRAC = 0.50
     _ARMOUR_FRAC = 0.25
 
     def extract(
@@ -104,7 +110,9 @@ class HPBarExtractor(RegionExtractor):
         if h == 0 or w == 0:
             return {"hp": 0, "hp_low": False, "armour": False}
 
-        hp_slice = region_image[int(h * (1 - self._HP_BAR_HEIGHT_FRAC)):, :, :]
+        # HP bar: thin band in left half of region.
+        hp_left = max(1, int(w * self._HP_LEFT_FRAC))
+        hp_slice = region_image[int(h * self._HP_BAND_TOP): int(h * self._HP_BAND_BOTTOM), :hp_left, :]
         green_mask = cv_in_range(hp_slice, _HP_GREEN_LOW, _HP_GREEN_HIGH)
         red_mask = cv_in_range(hp_slice, _HP_RED_LOW, _HP_RED_HIGH)
 
@@ -112,16 +120,23 @@ class HPBarExtractor(RegionExtractor):
         red_px = int(np.sum(red_mask > 0))
 
         bar_height = hp_slice.shape[0]
-        expected_max_pixels = w * bar_height
+        expected_max_pixels = hp_left * bar_height
         hp_ratio = (green_px + red_px) / max(expected_max_pixels, 1)
         hp = min(100, max(0, int(round(hp_ratio * 100))))
         hp_low = red_px > green_px
 
-        armour_slice = region_image[: int(h * self._ARMOUR_FRAC), :, :]
+        # Armour: upper portion, left side.
+        armour_slice = region_image[: int(h * self._ARMOUR_FRAC), :hp_left, :]
         blue_mask = cv_in_range(armour_slice, _ARMOUR_BLUE_LOW, _ARMOUR_BLUE_HIGH)
         armour = int(np.sum(blue_mask > 0)) > _TEXT_PIXEL_THRESHOLD
 
-        return {"hp": hp, "hp_low": hp_low, "armour": armour}
+        # Ammo: right half of region, look for yellow digits.
+        ammo_slice = region_image[:, hp_left:, :]
+        yellow_mask = cv_in_range(ammo_slice, _YELLOW_TEXT_LOW, _YELLOW_TEXT_HIGH)
+        ammo_px = int(np.sum(yellow_mask > 0))
+        ammo_visible = ammo_px > _TEXT_PIXEL_THRESHOLD * 2
+
+        return {"hp": hp, "hp_low": hp_low, "armour": armour, "ammo_visible": ammo_visible, "ammo_pixels": ammo_px}
 
 
 # -- kill feed ----------------------------------------------------------------
