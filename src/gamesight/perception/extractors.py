@@ -91,16 +91,14 @@ class CrosshairExtractor(RegionExtractor):
 class HPBarExtractor(RegionExtractor):
     """Estimate HP, armour, and ammo from the bottom-centre HUD bar.
 
-    Layout (left to right): armour | HP number + bar | kills/name | bullets | mags
+    Layout (left to right): armour+HP (25%) | kills/name (50%) | ammo (25%)
     """
 
-    _HP_BAND_TOP = 0.30
-    _HP_BAND_BOTTOM = 0.60
-    _ARMOUR_LEFT = 0.18      # armour on far left
-    _HP_START = 0.18          # HP bar starts after armour
-    _HP_END = 0.55            # HP bar ends, ammo starts
-    _AMMO_START = 0.75        # ammo on far right
-    _ARMOUR_FRAC = 0.30
+    _HPAC_END = 0.25           # armour + HP in left 25%
+    _AMMO_START = 0.75         # ammo in right 25%
+    _HP_BAND_TOP = 0.25
+    _HP_BAND_BOTTOM = 0.65
+    _ARMOUR_TOP_FRAC = 0.35
 
     def extract(
         self,
@@ -112,11 +110,10 @@ class HPBarExtractor(RegionExtractor):
         if h == 0 or w == 0:
             return {"hp": 0, "hp_low": False, "armour": False, "ammo_visible": False, "ammo_pixels": 0}
 
-        hp_x1 = int(w * self._HP_START)
-        hp_x2 = int(w * self._HP_END)
+        hpac_x2 = int(w * self._HPAC_END)
 
-        # HP bar: thin band in the HP zone.
-        hp_slice = region_image[int(h * self._HP_BAND_TOP): int(h * self._HP_BAND_BOTTOM), hp_x1:hp_x2, :]
+        # HP bar: thin band in the left 25% (armour+HP zone).
+        hp_slice = region_image[int(h * self._HP_BAND_TOP): int(h * self._HP_BAND_BOTTOM), :hpac_x2, :]
         green_mask = cv_in_range(hp_slice, _HP_GREEN_LOW, _HP_GREEN_HIGH)
         red_mask = cv_in_range(hp_slice, _HP_RED_LOW, _HP_RED_HIGH)
 
@@ -124,19 +121,17 @@ class HPBarExtractor(RegionExtractor):
         red_px = int(np.sum(red_mask > 0))
         coloured = green_px + red_px
 
-        # HP is estimated from coloured pixel density in the thin band.
         bar_pixels = hp_slice.shape[0] * hp_slice.shape[1]
         hp_ratio = coloured / max(bar_pixels, 1)
         hp = min(100, max(0, int(round(hp_ratio * 100))))
         hp_low = red_px > green_px
 
-        # Armour: far left, upper portion.
-        armour_x2 = int(w * self._ARMOUR_LEFT)
-        armour_slice = region_image[: int(h * self._ARMOUR_FRAC), :armour_x2, :]
+        # Armour: top portion of left 25%.
+        armour_slice = region_image[: int(h * self._ARMOUR_TOP_FRAC), :hpac_x2, :]
         blue_mask = cv_in_range(armour_slice, _ARMOUR_BLUE_LOW, _ARMOUR_BLUE_HIGH)
         armour = int(np.sum(blue_mask > 0)) > _TEXT_PIXEL_THRESHOLD
 
-        # Ammo: far right (bullets + magazines).
+        # Ammo: right 25%.
         ammo_x1 = int(w * self._AMMO_START)
         ammo_slice = region_image[:, ammo_x1:, :]
         yellow_mask = cv_in_range(ammo_slice, _YELLOW_TEXT_LOW, _YELLOW_TEXT_HIGH)

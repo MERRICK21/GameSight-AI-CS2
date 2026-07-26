@@ -89,7 +89,7 @@ class HPBarExtractorTests(TestCase):
         """A solid green region in the HP bar zone maps to ~100 HP."""
         img = np.zeros((110, 420, 3), dtype=np.uint8)
         green = (50, 220, 50)
-        img[33:67, 75:232, :] = green
+        img[27:72, 0:106, :] = green
         result = self.extractor.extract(img, 0, 0.0)
         self.assertGreaterEqual(result["hp"], 80)
         self.assertFalse(result["hp_low"])
@@ -98,7 +98,7 @@ class HPBarExtractorTests(TestCase):
     def test_half_green_bar_is_partial_hp(self) -> None:
         img = np.zeros((110, 420, 3), dtype=np.uint8)
         green = (50, 220, 50)
-        img[33:67, 75:153, :] = green
+        img[27:72, 0:53, :] = green
         result = self.extractor.extract(img, 0, 0.0)
         self.assertGreater(result["hp"], 20)
         self.assertLess(result["hp"], 70)
@@ -107,7 +107,7 @@ class HPBarExtractorTests(TestCase):
     def test_red_bar_signals_low_hp(self) -> None:
         img = np.zeros((110, 420, 3), dtype=np.uint8)
         red = (30, 30, 230)
-        img[33:67, 75:232, :] = red
+        img[27:72, 0:106, :] = red
         result = self.extractor.extract(img, 0, 0.0)
         self.assertTrue(result["hp_low"], "Red-dominated HP zone should set hp_low")
 
