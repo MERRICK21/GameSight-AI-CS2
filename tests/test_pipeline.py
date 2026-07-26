@@ -63,10 +63,10 @@ def _hp_frame(index: int, ts: float) -> VideoFrame:
     img = np.zeros((1080, 1920, 3), dtype=np.uint8)
     green = (50, 220, 50)
     blue = (160, 100, 20)
-    # HP bar: thin band at rows ~934-979, left half cols ~480-960
-    img[940:970, 550:900, :] = green
-    # Armour (top 25%): rows ~855-911, left half
-    img[870:900, 550:900, :] = blue
+    # HP bar: cols 18%-55%, rows 30%-60%
+    img[930:980, 670:990, :] = green
+    # Armour: far left 18%, top 30%
+    img[870:900, 500:650, :] = blue
     return VideoFrame(frame_index=index, timestamp_sec=ts, image=img)
 
 

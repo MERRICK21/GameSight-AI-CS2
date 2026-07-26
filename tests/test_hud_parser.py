@@ -85,17 +85,17 @@ class CS2HudParserIntegrationTests(TestCase):
 
     def test_hp_bar_full_green_detected(self) -> None:
         frame = self._blank_frame()
-        # HP bar: thin band rows ~934-979, left half cols ~480-960
+        # HP zone: cols 18%-55% = ~653-1008, rows 30%-60% = ~922-990
         green = (50, 220, 50)
-        frame[940:970, 550:900, :] = green
+        frame[930:980, 670:990, :] = green
         state = self.parser.parse(frame, 0, 0.0)
         self.assertGreaterEqual(state.values["player_status.hp"], 40)
 
     def test_armour_blue_detected(self) -> None:
         frame = self._blank_frame()
         blue = (160, 100, 20)
-        # Armour: top 25%, left half. Rows 855..911, cols 480..960
-        frame[870:900, 550:900, :] = blue
+        # Armour: far left 18%, top 30%. Rows 855..922, cols 480..650
+        frame[870:900, 500:650, :] = blue
         state = self.parser.parse(frame, 0, 0.0)
         self.assertTrue(state.values["player_status.armour"])
 
