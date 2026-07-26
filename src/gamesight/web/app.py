@@ -37,7 +37,7 @@ if "analysis_run" not in st.session_state:
         "analysis_run": False, "result": None, "analysis_obj": None,
         "tracks": None, "progress": 0, "status": "",
         "coach_suggestions": None, "coach_summary": None,
-        "screenshots": None, "live_result": None, "locale": "en",
+        "screenshots": None, "live_result": None, "locale": "en", "mode": "video", "debug_screenshots": [],
         "player_filter": False, "player_name": "", "use_ocr": False, "use_yolo": False,
     })
 
@@ -163,7 +163,49 @@ def _demo_pipeline() -> dict:
     return cr.model_dump(mode="json")
 
 
-# Sidebar
+
+REGION_COLORS = {
+    "minimap": (0, 255, 0), "round_info": (255, 255, 0),
+    "kill_feed": (255, 0, 0), "crosshair": (0, 255, 255),
+    "money": (255, 0, 255), "player_status": (0, 165, 255),
+    "weapon_utility": (128, 0, 255),
+}
+REGION_NAMES = {
+    "minimap": "Minimap", "round_info": "Round/Timer",
+    "kill_feed": "Kill Feed", "crosshair": "Crosshair",
+    "money": "Money", "player_status": "HP/Armour",
+    "weapon_utility": "Weapon/Utility",
+}
+
+def _draw_hud_debug(pil_img, profile) -> Image.Image:
+    """Draw bounding boxes and labels for all HUD regions on the image."""
+    import PIL.ImageDraw, PIL.ImageFont
+    img = pil_img.copy()
+    draw = PIL.ImageDraw.Draw(img)
+    w, h = img.size
+    try:
+        font = PIL.ImageFont.truetype("arial.ttf", 14)
+    except Exception:
+        font = PIL.ImageFont.load_default()
+
+    for region in profile.regions:
+        color = REGION_COLORS.get(region.name, (255, 255, 255))
+        name = REGION_NAMES.get(region.name, region.name)
+        x, y, rw, rh = region.to_pixel(w, h)
+        # Clamp
+        x = max(0, min(x, w - 1)); y = max(0, min(y, h - 1))
+        rw = max(1, min(rw, w - x)); rh = max(1, min(rh, h - y))
+        x2, y2 = x + rw, y + rh
+        # Draw box
+        draw.rectangle([x, y, x2, y2], outline=color, width=2)
+        # Draw label background
+        label = name
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        label_y = y - th - 4 if y > th + 4 else y2 + 2
+        draw.rectangle([x, label_y, x + tw + 6, label_y + th + 4], fill=color)
+        draw.text((x + 3, label_y + 2), label, fill=(0, 0, 0), font=font)
+    return img# Sidebar
 with st.sidebar:
     st.title(f"\U0001f3af {_t('app.title')}"); st.caption(_t("app.subtitle")); st.divider()
     lang_labels = {"en": "English", "zh-CN": "\u7b80\u4f53\u4e2d\u6587"}
