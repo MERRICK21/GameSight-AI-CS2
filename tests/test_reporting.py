@@ -344,6 +344,21 @@ class EvidenceReportBuilderEnemyVisibleTests(TestCase):
         report = self.builder.build(_analysis(rounds=[ra]))
         self.assertEqual(report.rounds[0].stats.enemy_first_visible_sec, 8.0)
 
+    def test_enemy_time_is_relative_to_round_and_engagement_is_counted(self) -> None:
+        ra = RoundAnalysis(
+            round_id="round_002", start_sec=56.0, end_sec=97.0,
+            events=[
+                _event(EventType.ROUND_START, 56.0),
+                _event(EventType.ENEMY_FIRST_VISIBLE, 87.0),
+                _event(EventType.ENGAGEMENT_CANDIDATE, 87.0),
+                _event(EventType.ROUND_END, 97.0),
+            ],
+        )
+        report = self.builder.build(_analysis(rounds=[ra]))
+        self.assertEqual(report.rounds[0].stats.enemy_first_visible_sec, 31.0)
+        self.assertEqual(report.rounds[0].stats.engagement_windows, 1)
+        self.assertEqual(report.overview.total_engagement_windows, 1)
+
 
 class EvidenceReportBuilderTrackTests(TestCase):
     def setUp(self) -> None:

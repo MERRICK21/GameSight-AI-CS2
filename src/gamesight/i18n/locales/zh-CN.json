@@ -11,19 +11,21 @@
     "demo_mode": "演示模式（合成数据）",
     "demo_help": "使用合成 CS2 比赛数据，即时运行，无需视频。",
     "upload_label": "上传 CS2 录像",
-    "upload_help": "选择 CS2 第一人称 POV 录像。推荐 16:9 (1920x1080)。",
+    "upload_help": "选择 CS2 第一人称 POV 录像，单文件最大 2 GB。推荐 16:9 (1920x1080)。",
     "settings": "分析设置",
     "sample_fps": "分析帧率",
-    "sample_fps_help": "每秒采样帧数。越低越快，越高越精细。",
+    "sample_fps_help": "白屏、架镜与视角信号的每秒采样数。回合 HUD 固定为 2 FPS，避免高帧率重复执行慢速解析。",
+    "sampling_strategy": "视觉效果：{fps} FPS · 回合 HUD：2 FPS · 比分 OCR：每 2 秒",
     "language": "语言",
     "player_filter": "按玩家筛选",
     "player_filter_help": "只分析你的视角画面。跳过死亡后的观战画面。",
     "player_name": "玩家名称",
-    "player_name_help": "你的游戏内名称（未来将支持 OCR 匹配）。当前跳过死亡后的观战帧。",
+    "player_name_help": "可选的游戏 HUD 玩家名称。视频水印和作者 ID 会被忽略。",
     "ocr_label": "OCR 回合检测",
     "ocr_help": "通过颜色检测读取比分。比计时器检测更稳定。",
-    "yolo_label": "YOLO 玩家检测",
-    "yolo_help": "检测并分类玩家。需要 GPU + pip install ultralytics torch",
+    "ocr_automatic": "比分 OCR 已自动启用，并且只读取 CS2 原生计分板。",
+    "yolo_label": "CS2 敌方与交战检测",
+    "yolo_help": "使用可选的 CS2 专用模型区分 T/CT，并定位实际遇敌时刻。GPU 会显著加快分析。",
     "ai_features": "AI 功能"
   },
   "run": {
@@ -36,7 +38,9 @@
     "complete": "分析完成！",
     "generating_demo": "正在生成演示事件...",
     "aggregating": "正在聚合回合...",
-    "building_report": "正在构建报告..."
+    "building_report": "正在构建报告...",
+    "personal_combat_unavailable": "在 CS2 原生 HUD 信号能够可靠归属前，个人击杀和死亡暂不可用；视频水印会被忽略。",
+    "cs2_model_unavailable": "CS2 敌方检测未启用，继续运行基础第一视角分析"
   },
   "tabs": {
     "overview": "概览",
@@ -62,7 +66,12 @@
     "first_enemy": "首次遇敌",
     "player_died": "是否阵亡",
     "survival": "生存时间",
-    "enemies_encountered": "遇敌数"
+    "enemies_encountered": "遇敌数",
+    "flash": "白屏暴露",
+    "scoped": "开镜时间",
+    "view_motion": "视角活动度",
+    "stationary": "静止画面",
+    "engagements": "交战窗口"
   },
   "timeline": {
     "title": "事件时间线",
@@ -104,7 +113,8 @@
   "coach": {
     "title": "AI 教练",
     "subtitle": "基于证据的教练建议",
-    "no_suggestions": "此比赛无可用的教练建议。",
+    "no_suggestions": "没有检测到足够可靠的第一视角事件，因此不生成推测性建议。",
+    "first_person_coverage": "白屏、连续架镜与已确认的敌方可见窗口会生成证据建议。视角活动度仅作描述，不会被当成瞄准错误；交战卡只提示复盘范围，不会凭单帧断言枪法好坏。",
     "round_label": "回合",
     "timestamp": "时间戳",
     "category": "类别",
@@ -142,7 +152,10 @@
     "kd_declining": "K/D 正在下降：前半段 {early:.1f} -> 后半段 {late:.1f}。对手可能已经适应了你的打法。",
     "early_deaths": "你在 {count}/{total} 个回合的前 30 秒内死亡（{pct:.0f}%）。过早死亡会给敌方带来巨大优势。",
     "loss_streak": "你经历了 {streak} 连败。这可能表明心态失衡或对手在针对你的固定模式。",
-    "inconsistent": "回合间波动较大：击杀数从 {min} 到 {max}（平均 {avg:.1f}）。你的表现不够稳定。"
+    "inconsistent": "回合间波动较大：击杀数从 {min} 到 {max}（平均 {avg:.1f}）。你的表现不够稳定。",
+    "flash_episode": "此处连续白屏约 {seconds:.1f} 秒，已定位到具体发生时刻。",
+    "scope_episode": "此处连续架镜约 {seconds:.1f} 秒，外围信息获取可能受限。",
+    "engagement_window": "本回合开始后 {time:.1f} 秒检测到敌方角色，已建立有画面证据的交战复盘窗口。"
   },
   "coach_action": {
     "death_heavy": "在掩体后架枪。探点前先使用闪光弹/烟雾弹。只在有明确优势时对枪。",
@@ -155,7 +168,10 @@
     "kd_declining": "在不同回合之间变换打法。如果你总是探同一个角度，对手会提前预瞄。",
     "early_deaths": "优先保证开局阶段的存活。使用更安全的行进路线，仔细检查每个拐角。",
     "loss_streak": "连续输掉 2 回合后，进行心理重置。改变站位或尝试新的角度。",
-    "inconsistent": "注重稳定性。比赛前打 10 分钟死斗模式来稳定枪感。"
+    "inconsistent": "注重稳定性。比赛前打 10 分钟死斗模式来稳定枪感。",
+    "flash_exposure": "看到来闪时及时背闪并借掩体规避，恢复视野后再探。",
+    "scope_hold": "长时间架镜时定期退镜获取外围信息，避免只盯一个角度。",
+    "engagement_review": "查看此帧前后约 2 秒：检查准星是否处在可能出现敌人的高度、身体是否有掩体，以及开枪后能否撤回或被队友补枪。"
   },
   "live": {
     "title": "实时分析",
@@ -187,7 +203,10 @@
     "match_rounds": "分析了视频 \"{vid}\" 的 {n} 个回合（时长 {dur} 秒）。",
     "match_total_kills": "全部回合共检测到 {n} 次击杀。",
     "match_total_deaths": "全部回合共检测到 {n} 次死亡。",
-    "match_no_combat": "整场比赛未检测到战斗事件（击杀或死亡）。"
+    "match_no_combat": "整场比赛未检测到战斗事件（击杀或死亡）。",
+    "flash_exposure": "被闪 {n} 次，累计白屏约 {sec:.1f} 秒。",
+    "scoped_time": "开镜 {sec:.1f} 秒（占本回合 {pct:.0f}%）。",
+    "view_dynamics": "视角活动度 {motion:.2f}；静止画面占比 {stationary:.0f}%（仅描述跑图、转身等画面变化，不代表瞄准质量）。"
   },
   "live_advice": {
     "hp_critical": "HP 危急 ({hp}) -- 一枪就死",
@@ -210,6 +229,20 @@
     "round_inactive": "回合未激活（冻结时间或已结束）"
   },
   "summary_title": "赛后总结",
+  "combat_unavailable": {
+    "strength": "已通过原生计分板可靠重建 {rounds} 个回合。",
+    "weakness": "当前 HUD 尚不能安全归属个人击杀和死亡。",
+    "drill": "查看各回合的第一视角关键帧，复盘站位与架枪角度。",
+    "focus": "第一视角站位、准星位置和决策时机。",
+    "assessment": "已从 CS2 原生计分板识别 {rounds} 个回合。系统不会使用无关水印推断 K/D，因此暂不生成 K/D 教练结论。"
+  },
+  "first_person_summary": {
+    "flash_weakness": "一个或多个回合的白屏暴露时间偏长。",
+    "flash_drill": "在常见进攻路线与队友练习背闪和恢复视野后的再探时机。",
+    "scope_focus": "长时间架镜时注意退镜刷新外围信息。",
+    "engagement_strength": "已从第一视角画面定位到可复盘的真实遇敌窗口。",
+    "engagement_focus": "围绕已确认遇敌帧，复盘前后 2 秒的预瞄、掩体与补枪条件。"
+  },
   "strengths": "优势",
   "weaknesses": "短板",
   "focus_areas": "重点方向",

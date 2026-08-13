@@ -116,6 +116,21 @@ class RuleBasedCoachTests(TestCase):
         s = self.coach.generate(a, self._report(a))
         self.assertTrue(any(x.category == CoachCategory.GAME_SENSE for x in s))
 
+    def test_first_person_engagement_gets_grounded_review_not_aim_verdict(self) -> None:
+        event = _event(EventType.ENGAGEMENT_CANDIDATE, 35.0, frame=1050)
+        ra = RoundAnalysis(
+            round_id="r1", start_sec=10.0, end_sec=70.0, events=[event],
+        )
+        analysis = self._analysis([ra])
+        analysis.capabilities = {"personal_combat": False, "enemy_contact": True}
+        suggestions = self.coach.generate(analysis, self._report(analysis))
+        engagement = next(
+            item for item in suggestions if "engagement_" in item.suggestion_id
+        )
+        self.assertEqual(engagement.timestamp_sec, 35.0)
+        self.assertIn("Review", engagement.action)
+        self.assertNotIn("unstable", engagement.reasoning.lower())
+
     def test_no_combat_round(self) -> None:
         ra = RoundAnalysis(round_id="r1", start_sec=0.0, end_sec=80.0, events=[
             _event(EventType.ROUND_START, 0.0), _event(EventType.ROUND_END, 80.0)])

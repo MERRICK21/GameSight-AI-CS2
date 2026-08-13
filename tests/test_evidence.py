@@ -8,9 +8,15 @@ from unittest import TestCase
 
 import numpy as np
 
-from gamesight.domain.models import EventType, Evidence, GameEvent
+from gamesight.domain.models import (
+    AnalysisResult, EventType, Evidence, GameEvent, RoundAnalysis,
+    VideoInput, VideoMetadata,
+)
 from gamesight.evidence.models import EvidenceImage
-from gamesight.evidence.extractor import OpenCVScreenshotExtractor
+from gamesight.evidence.extractor import (
+    OpenCVScreenshotExtractor,
+    build_round_keyframe_events,
+)
 
 
 class _MockCV2:
@@ -177,3 +183,39 @@ class ScreenshotExtractorTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             images = extractor.extract("bad.mp4", events, Path(tmp))
             self.assertEqual(images, [])
+
+
+class RoundKeyframeEventTests(TestCase):
+
+    def _analysis(self) -> AnalysisResult:
+        return AnalysisResult(
+            video=VideoInput(video_id="v", path=Path("v.mp4")),
+            metadata=VideoMetadata(
+                duration_sec=120.0, fps=30.0, width=1920, height=1080,
+            ),
+            rounds=[
+                RoundAnalysis(round_id="round_001", start_sec=0.0, end_sec=60.0),
+                RoundAnalysis(round_id="round_002", start_sec=60.0, end_sec=120.0),
+            ],
+        )
+
+    def test_builds_two_interior_frames_per_round(self) -> None:
+        events = build_round_keyframe_events(self._analysis())
+        self.assertEqual(len(events), 4)
+        self.assertEqual([round(e.start_sec, 1) for e in events], [20.0, 40.0, 80.0, 100.0])
+        self.assertTrue(all(e.event_type == EventType.KEYFRAME for e in events))
+        self.assertEqual(events[0].evidence[0].frame_index, 600)
+        self.assertEqual(events[2].attributes["round_id"], "round_002")
+
+    def test_respects_limit(self) -> None:
+        events = build_round_keyframe_events(
+            self._analysis(), samples_per_round=3, max_events=3,
+        )
+        self.assertEqual(len(events), 3)
+
+    def test_uses_video_end_for_truncated_round(self) -> None:
+        analysis = self._analysis()
+        analysis.rounds[-1].end_sec = None
+        events = build_round_keyframe_events(analysis, samples_per_round=1)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1].start_sec, 90.0)

@@ -40,7 +40,12 @@ class RuleBasedCoach(CoachEngine):
         self._counter = 0
         suggestions: list[CoachSuggestion] = []
         for ra, rr in zip(analysis.rounds, report.rounds):
-            suggestions.extend(self._analyse_round(ra, rr.stats))
+            if report.overview.personal_combat_available:
+                suggestions.extend(self._analyse_round(ra, rr.stats))
+            else:
+                suggestions.extend(self._analyse_first_person(ra, rr.stats))
+        if not report.overview.personal_combat_available:
+            return suggestions
         suggestions.extend(self._check_kd_trend(analysis, report))
         suggestions.extend(self._check_survival_pattern(analysis, report))
         suggestions.extend(self._check_momentum(analysis, report))
@@ -60,6 +65,49 @@ class RuleBasedCoach(CoachEngine):
         result.extend(self._check_early_enemy_contact(ra, stats))
         result.extend(self._check_no_combat_round(ra, stats))
         result.extend(self._check_combat_density(ra, stats))
+        return result
+
+    def _analyse_first_person(self, ra: RoundAnalysis, stats: RoundStats) -> list[CoachSuggestion]:
+        """Coach only from viewport geometry; never from names or watermarks."""
+        result: list[CoachSuggestion] = []
+        engagements = [
+            event for event in ra.events
+            if event.event_type == EventType.ENGAGEMENT_CANDIDATE
+        ]
+        for index, event in enumerate(engagements[:3], start=1):
+            elapsed = max(0.0, event.start_sec - ra.start_sec)
+            result.append(self._make(
+                f"engagement_{ra.round_id}_{index:02d}",
+                CoachCategory.GAME_SENSE,
+                ra.round_id,
+                event.start_sec,
+                self._t.t("coach_reasoning.engagement_window", time=elapsed),
+                self._t.t("coach_action.engagement_review"),
+                event.confidence,
+                [self._ev_link(event)],
+            ))
+        moments = [
+            event for event in ra.events
+            if event.event_type == EventType.FIRST_PERSON_MOMENT
+        ]
+        for event in moments:
+            kind = event.attributes.get("moment_kind")
+            duration = float(event.attributes.get("duration_sec", 0.0))
+            evidence = [self._ev_link(event)]
+            if kind == "flash" and duration >= 2.0:
+                result.append(self._make(
+                    f"flash_{ra.round_id}", CoachCategory.UTILITY, ra.round_id,
+                    event.start_sec,
+                    self._t.t("coach_reasoning.flash_episode", seconds=duration),
+                    self._t.t("coach_action.flash_exposure"), 0.84, evidence,
+                ))
+            elif kind == "scope" and duration >= 8.0:
+                result.append(self._make(
+                    f"scope_hold_{ra.round_id}", CoachCategory.POSITIONING,
+                    ra.round_id, event.start_sec,
+                    self._t.t("coach_reasoning.scope_episode", seconds=duration),
+                    self._t.t("coach_action.scope_hold"), 0.82, evidence,
+                ))
         return result
 
     def _check_death_heavy_round(self, ra: RoundAnalysis, stats: RoundStats) -> list[CoachSuggestion]:
@@ -207,6 +255,29 @@ class RuleBasedCoach(CoachEngine):
     # -- summary -------------------------------------------------------------
 
     def _build_summary(self, suggestions: list[CoachSuggestion], analysis: AnalysisResult, report: MatchReport) -> CoachSummary:
+        if not report.overview.personal_combat_available:
+            rounds = report.overview.total_rounds
+            has_flash = any("flash_" in item.suggestion_id for item in suggestions)
+            has_scope = any("scope_hold_" in item.suggestion_id for item in suggestions)
+            has_engagement = any("engagement_" in item.suggestion_id for item in suggestions)
+            weaknesses = [self._t.t("combat_unavailable.weakness")]
+            drills = [self._t.t("combat_unavailable.drill")]
+            focus = [self._t.t("combat_unavailable.focus")]
+            if has_flash:
+                weaknesses.append(self._t.t("first_person_summary.flash_weakness"))
+                drills.append(self._t.t("first_person_summary.flash_drill"))
+            if has_scope:
+                focus.append(self._t.t("first_person_summary.scope_focus"))
+            if has_engagement:
+                strengths.append(self._t.t("first_person_summary.engagement_strength"))
+                focus.append(self._t.t("first_person_summary.engagement_focus"))
+            return CoachSummary(
+                strengths=[self._t.t("combat_unavailable.strength", rounds=rounds)],
+                weaknesses=weaknesses,
+                practice_drills=drills,
+                focus_areas=focus,
+                overall_assessment=self._t.t("combat_unavailable.assessment", rounds=rounds),
+            )
         strengths: list[str] = []
         weaknesses: list[str] = []
         drills: list[str] = []

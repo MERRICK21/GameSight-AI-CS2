@@ -32,9 +32,10 @@ class EvidenceReportBuilder:
 
     def build(self, analysis: AnalysisResult, tracks: list[Track] | None = None) -> MatchReport:
         self._finding_counter = 0
+        personal_combat = analysis.capabilities.get("personal_combat", True)
         timeline = self._tl_builder.build(analysis, tracks)
         round_reports = [
-            self._build_round_report(ra, tl_round)
+            self._build_round_report(ra, tl_round, personal_combat)
             for ra, tl_round in zip(analysis.rounds, timeline.rounds)
         ]
         overview = self._build_overview(analysis, round_reports, timeline)
@@ -43,25 +44,32 @@ class EvidenceReportBuilder:
             match_findings=self._build_match_findings(analysis, overview),
         )
 
-    def _build_round_report(self, ra: RoundAnalysis, tl_round) -> RoundReport:
-        stats = self._compute_round_stats(ra, tl_round)
-        findings = self._build_round_findings(ra, stats)
+    def _build_round_report(self, ra: RoundAnalysis, tl_round, personal_combat: bool = True) -> RoundReport:
+        stats = self._compute_round_stats(ra, tl_round, personal_combat)
+        findings = self._build_round_findings(ra, stats, personal_combat)
         return RoundReport(
             round_id=ra.round_id, start_sec=ra.start_sec, end_sec=ra.end_sec,
             duration_sec=stats.duration_sec, stats=stats, findings=findings,
         )
 
-    def _compute_round_stats(self, ra: RoundAnalysis, tl_round) -> RoundStats:
+    def _compute_round_stats(self, ra: RoundAnalysis, tl_round, personal_combat: bool = True) -> RoundStats:
         kills = 0; deaths = 0; killfeed = 0
         enemy_first_vis: float | None = None; combat_segments = 0
+        engagement_windows = 0
+        first_person: dict = {}
         for event in ra.events:
             et = event.event_type
             if et == EventType.PLAYER_KILL: kills += 1
             elif et == EventType.PLAYER_DEATH: deaths += 1
             elif et == EventType.ENEMY_FIRST_VISIBLE:
-                if enemy_first_vis is None or event.start_sec < enemy_first_vis:
-                    enemy_first_vis = event.start_sec
+                relative_sec = max(0.0, event.start_sec - ra.start_sec)
+                if enemy_first_vis is None or relative_sec < enemy_first_vis:
+                    enemy_first_vis = relative_sec
             elif et == EventType.COMBAT_START: combat_segments += 1
+            elif et == EventType.ENGAGEMENT_CANDIDATE:
+                engagement_windows += 1
+            elif et == EventType.FIRST_PERSON_SUMMARY:
+                first_person = event.attributes
             for ev in event.evidence:
                 if "kill_feed" in ev.source.lower(): killfeed += 1; break
         duration = round(ra.end_sec - ra.start_sec, 2) if ra.end_sec is not None else None
@@ -69,7 +77,7 @@ class EvidenceReportBuilder:
         teammate_tracks = sum(1 for t in tl_round.tracks if t.label == "teammate")
         # Survival: time from round start to death, or full duration if survived.
         survival: float | None = None
-        if duration is not None:
+        if duration is not None and personal_combat:
             death_events = [e for e in ra.events if e.event_type == EventType.PLAYER_DEATH]
             if death_events:
                 survival = round(min(e.start_sec for e in death_events) - ra.start_sec, 1)
@@ -81,9 +89,17 @@ class EvidenceReportBuilder:
             enemies_encountered=enemy_tracks, survival_sec=survival,
             teammate_tracks=teammate_tracks, enemy_first_visible_sec=enemy_first_vis,
             combat_segments=combat_segments,
+            personal_combat_available=personal_combat,
+            flash_count=int(first_person.get("flash_count", 0)),
+            flash_exposure_sec=float(first_person.get("flash_exposure_sec", 0.0)),
+            scoped_sec=float(first_person.get("scoped_sec", 0.0)),
+            scoped_ratio=float(first_person.get("scoped_ratio", 0.0)),
+            view_motion_avg=float(first_person.get("view_motion_avg", 0.0)),
+            stationary_ratio=float(first_person.get("stationary_ratio", 0.0)),
+            engagement_windows=engagement_windows,
         )
 
-    def _build_round_findings(self, ra: RoundAnalysis, stats: RoundStats) -> list[ReportFinding]:
+    def _build_round_findings(self, ra: RoundAnalysis, stats: RoundStats, personal_combat: bool = True) -> list[ReportFinding]:
         findings: list[ReportFinding] = []
         t = self._t
         start_ev = self._first_event(ra, EventType.ROUND_START)
@@ -102,19 +118,19 @@ class EvidenceReportBuilder:
                 FindingCategory.ROUND_FLOW, FindingSeverity.WARNING,
                 t.t("report_finding.round_truncated"), 0.80, []))
 
-        if stats.kills_detected > 0:
+        if personal_combat and stats.kills_detected > 0:
             kill_events = [e for e in ra.events if e.event_type == EventType.PLAYER_KILL]
             evidence = [lk for ev in kill_events for lk in self._to_links(ev.evidence)]
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_kills",
                 FindingCategory.COMBAT, FindingSeverity.INFO,
                 t.t("report_finding.kills_detected", n=stats.kills_detected), 0.55, evidence))
-        if stats.player_died:
+        if personal_combat and stats.player_died:
             death_events = [e for e in ra.events if e.event_type == EventType.PLAYER_DEATH]
             evidence = [lk for ev in death_events for lk in self._to_links(ev.evidence)]
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_deaths",
                 FindingCategory.COMBAT, FindingSeverity.WARNING,
                 t.t("report_finding.deaths_detected", n=1), 0.85, evidence))
-        if stats.kills_detected == 0 and not stats.player_died:
+        if personal_combat and stats.kills_detected == 0 and not stats.player_died:
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_none",
                 FindingCategory.COMBAT, FindingSeverity.INFO,
                 t.t("report_finding.no_combat"), 0.70, []))
@@ -128,6 +144,23 @@ class EvidenceReportBuilder:
             findings.append(self._make_finding(f"{self._PREFIX_MOVEMENT}_enemy_tracks",
                 FindingCategory.MOVEMENT, FindingSeverity.INFO,
                 t.t("report_finding.enemy_tracks", n=stats.enemy_tracks), 0.75, []))
+        first_person_event = self._first_event(ra, EventType.FIRST_PERSON_SUMMARY)
+        if first_person_event is not None:
+            evidence = first_person_event.evidence
+            if stats.flash_exposure_sec > 0:
+                findings.append(self._make_finding(f"{self._PREFIX_MOVEMENT}_flash",
+                    FindingCategory.UTILITY, FindingSeverity.WARNING,
+                    t.t("report_finding.flash_exposure", n=stats.flash_count,
+                        sec=stats.flash_exposure_sec), 0.88, evidence))
+            if stats.scoped_sec > 0:
+                findings.append(self._make_finding(f"{self._PREFIX_MOVEMENT}_scope",
+                    FindingCategory.MOVEMENT, FindingSeverity.INFO,
+                    t.t("report_finding.scoped_time", sec=stats.scoped_sec,
+                        pct=stats.scoped_ratio * 100), 0.86, evidence))
+            findings.append(self._make_finding(f"{self._PREFIX_MOVEMENT}_view_dynamics",
+                FindingCategory.MOVEMENT, FindingSeverity.INFO,
+                t.t("report_finding.view_dynamics", motion=stats.view_motion_avg,
+                    stationary=stats.stationary_ratio * 100), 0.80, evidence))
         return findings
 
     def _build_overview(self, analysis, round_reports, timeline) -> MatchOverview:
@@ -144,6 +177,10 @@ class EvidenceReportBuilder:
             total_kills_detected=total_kills, total_deaths_detected=total_deaths,
             total_enemy_tracks=total_enemy, warnings=list(analysis.warnings),
             total_enemies_encountered=total_enemies, avg_survival_sec=avg_surv,
+            personal_combat_available=analysis.capabilities.get("personal_combat", True),
+            total_engagement_windows=sum(
+                round_report.stats.engagement_windows for round_report in round_reports
+            ),
         )
 
     def _build_match_findings(self, analysis, overview) -> list[ReportFinding]:
@@ -153,11 +190,11 @@ class EvidenceReportBuilder:
             FindingCategory.ROUND_FLOW, FindingSeverity.INFO,
             t.t("report_finding.match_rounds", n=overview.total_rounds,
                 vid=overview.video_id, dur=overview.duration_sec or "unknown"), 1.0, []))
-        if overview.total_kills_detected > 0:
+        if overview.personal_combat_available and overview.total_kills_detected > 0:
             findings.append(self._make_finding(f"{self._PREFIX_MATCH}_total_kills",
                 FindingCategory.COMBAT, FindingSeverity.INFO,
                 t.t("report_finding.match_total_kills", n=overview.total_kills_detected), 0.55, []))
-        if overview.total_deaths_detected > 0:
+        if overview.personal_combat_available and overview.total_deaths_detected > 0:
             findings.append(self._make_finding(f"{self._PREFIX_MATCH}_total_deaths",
                 FindingCategory.COMBAT, FindingSeverity.WARNING,
                 t.t("report_finding.match_total_deaths", n=overview.total_deaths_detected), 0.85, []))
@@ -165,7 +202,8 @@ class EvidenceReportBuilder:
             for i, w in enumerate(overview.warnings):
                 findings.append(self._make_finding(f"{self._PREFIX_MATCH}_warning_{i}",
                     FindingCategory.ROUND_FLOW, FindingSeverity.WARNING, w, 0.90, []))
-        if overview.total_kills_detected == 0 and overview.total_deaths_detected == 0:
+        if (overview.personal_combat_available and overview.total_kills_detected == 0
+                and overview.total_deaths_detected == 0):
             findings.append(self._make_finding(f"{self._PREFIX_MATCH}_no_combat",
                 FindingCategory.COMBAT, FindingSeverity.INFO,
                 t.t("report_finding.match_no_combat"), 0.70, []))

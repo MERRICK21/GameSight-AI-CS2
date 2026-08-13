@@ -11,19 +11,21 @@
                     "demo_mode":  "Demo Mode (synthetic data)",
                     "demo_help":  "Use synthetic CS2 match data 鈥?instant, no video needed.",
                     "upload_label":  "Upload CS2 recording",
-                    "upload_help":  "Select a CS2 first-person POV recording. 16:9 (1920脳1080) recommended.",
+                    "upload_help":  "Select a CS2 first-person POV recording (up to 2 GB). 16:9 (1920脳1080) recommended.",
                     "settings":  "Analysis Settings",
                     "sample_fps":  "Analysis FPS",
-                    "sample_fps_help":  "Frames sampled per second. Lower = faster, higher = more detail.",
+                    "sample_fps_help":  "Sampling rate for flash, scope and view signals. Round HUD stays at 2 FPS so high rates do not repeat slow parsing.",
+                    "sampling_strategy": "Visual effects: {fps} FPS · round HUD: 2 FPS · score OCR: every 2 seconds",
                     "language":  "Language",
                     "player_filter":  "Filter by Player",
                     "player_filter_help":  "Only analyze frames from your POV. Skips spectating after death.",
                     "player_name":  "Player Name",
-                    "player_name_help":  "Your in-game name (future: OCR matching). Currently skips post-death spectating frames.",
+                    "player_name_help":  "Optional game HUD player name. Video watermarks and creator IDs are ignored.",
                     "ocr_label":  "OCR Round Detection",
                     "ocr_help":  "Read scores via colour detection. More stable than timer-based.",
-                    "yolo_label":  "YOLO Player Detection",
-                    "yolo_help":  "Detect and classify players. Requires GPU + pip install ultralytics torch",
+                    "ocr_automatic":  "Score OCR is automatic and only reads the native CS2 scoreboard.",
+                    "yolo_label":  "CS2 Enemy & Engagement Detection",
+                    "yolo_help":  "Use the optional CS2-specific model to distinguish T/CT and locate actual enemy contacts. A GPU is strongly recommended.",
                     "ai_features":  "AI Features"
                 },
     "run":  {
@@ -37,7 +39,9 @@
                 "complete":  "Analysis complete!",
                 "generating_demo":  "Generating demo events...",
                 "aggregating":  "Aggregating rounds...",
-                "building_report":  "Building report..."
+                "building_report":  "Building report...",
+                "personal_combat_unavailable":  "Personal kills and deaths are unavailable until native CS2 HUD signals can be attributed reliably; video watermarks are ignored.",
+                "cs2_model_unavailable": "CS2 enemy detection is unavailable; continuing with basic first-person analysis"
             },
     "tabs":  {
                  "overview":  "Overview",
@@ -63,7 +67,12 @@
                      "first_enemy":  "1st Enemy",
                      "player_died":  "Died",
                      "survival":  "Survival",
-                     "enemies_encountered":  "Enemies Seen"
+                     "enemies_encountered":  "Enemies Seen",
+                     "flash": "Flash Exposure",
+                     "scoped": "Scoped Time",
+                     "view_motion": "View Activity",
+                     "stationary": "Stationary Frames",
+                     "engagements": "Engagement Windows"
                  },
     "timeline":  {
                      "title":  "Event Timeline",
@@ -105,7 +114,8 @@
     "coach":  {
                   "title":  "AI Coach",
                   "subtitle":  "Evidence-based coaching suggestions",
-                  "no_suggestions":  "No coaching suggestions available for this match.",
+                       "no_suggestions":  "No sufficiently reliable first-person moment was detected, so no speculative advice was generated.",
+                       "first_person_coverage": "Evidence cards cover flash, continuous-scope, and confirmed enemy-visible windows. View activity remains descriptive; an engagement card defines a review window and never judges aim quality from one frame.",
                   "round_label":  "Round",
                   "timestamp":  "Timestamp",
                   "category":  "Category",
@@ -143,7 +153,10 @@
                             "kd_declining":  "K/D declining: {early:.1f} early -\u003e {late:.1f} late. Opponents may have adapted to your playstyle.",
                             "early_deaths":  "You died within the first 30 seconds in {count}/{total} rounds ({pct:.0f}%). Early deaths give the enemy team a significant advantage.",
                             "loss_streak":  "You had a {streak}-round losing streak. This may indicate tilt or opponents exploiting a pattern.",
-                            "inconsistent":  "High round-to-round variance: kills range from {min} to {max} (avg {avg:.1f}). Your performance is inconsistent."
+                            "inconsistent":  "High round-to-round variance: kills range from {min} to {max} (avg {avg:.1f}). Your performance is inconsistent.",
+                            "flash_episode": "Continuous flash blindness lasted about {seconds:.1f}s here; this is linked to the exact moment.",
+                            "scope_episode": "This continuous scoped hold lasted about {seconds:.1f}s and may have limited peripheral information.",
+                            "engagement_window": "An opposing player was detected {time:.1f}s into this round, establishing a visual-evidence engagement review window."
                         },
     "coach_action":  {
                          "death_heavy":  "Hold angles from cover. Use utility (flash/smoke) before peeking common angles. Only peek when you have a clear advantage.",
@@ -156,7 +169,10 @@
                          "kd_declining":  "Vary your approach between rounds. If you always peek the same angles, opponents will pre-aim them.",
                          "early_deaths":  "Prioritise survival in the opening phase. Use safer pathing routes and check corners more carefully.",
                          "loss_streak":  "After 2 consecutive lost rounds, take a mental reset. Change your positioning or try a new angle.",
-                         "inconsistent":  "Focus on consistency. Practice deathmatch for 10 minutes before competitive matches to stabilise aim."
+                         "inconsistent":  "Focus on consistency. Practice deathmatch for 10 minutes before competitive matches to stabilise aim.",
+                         "flash_exposure": "Turn away from incoming flashes and use cover before re-peeking.",
+                         "scope_hold": "Unscope periodically to refresh peripheral information and avoid holding one angle too long.",
+                         "engagement_review": "Review about two seconds before and after this frame: check likely-head-height pre-aim, usable cover, and whether you could disengage or be traded after firing."
                      },
     "live":  {
                  "title":  "Live Analysis",
@@ -188,7 +204,10 @@
                            "match_rounds":  "Analyzed {n} round(s) from video \"{vid}\" (duration {dur}s).",
                            "match_total_kills":  "Total kills detected across all rounds: {n}.",
                            "match_total_deaths":  "Total deaths detected across all rounds: {n}.",
-                           "match_no_combat":  "No combat events (kills or deaths) detected in the entire match."
+                           "match_no_combat":  "No combat events (kills or deaths) detected in the entire match.",
+                           "flash_exposure": "Blinded {n} time(s), for about {sec:.1f}s total.",
+                           "scoped_time": "Scoped for {sec:.1f}s ({pct:.0f}% of the round).",
+                           "view_dynamics": "View activity {motion:.2f}; stationary-frame share {stationary:.0f}% (describes running and turning, not aim quality)."
                        },
     "live_advice":  {
                         "hp_critical":  "HP critical ({hp}) -- one shot from death",
@@ -211,6 +230,20 @@
                         "round_inactive":  "Round is not active (freeze time or ended)"
                     },
     "summary_title":  "Post-Match Summary",
+    "combat_unavailable": {
+      "strength": "Native scoreboard reconstruction identified {rounds} rounds reliably.",
+      "weakness": "Personal kills and deaths cannot yet be attributed safely from this HUD.",
+      "drill": "Review the representative first-person keyframes for positioning and angle selection.",
+      "focus": "First-person positioning, crosshair placement, and decision timing.",
+      "assessment": "Detected {rounds} rounds from the native CS2 scoreboard. K/D-based coaching is withheld rather than inferred from unrelated overlays."
+    },
+    "first_person_summary": {
+      "flash_weakness": "Flash exposure was substantial in one or more rounds.",
+      "flash_drill": "Practise anti-flash turns and re-peek timing with a teammate on common execute routes.",
+      "scope_focus": "Refresh peripheral information during long scoped holds.",
+      "engagement_strength": "Confirmed enemy-visible windows are now available for first-person review.",
+      "engagement_focus": "Use confirmed contact frames to review the preceding and following two seconds for pre-aim, cover, and trade conditions."
+    },
     "strengths":  "Strengths",
     "weaknesses":  "Weaknesses",
     "focus_areas":  "Focus Areas",

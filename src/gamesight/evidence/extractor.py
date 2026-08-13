@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from importlib import import_module
 from pathlib import Path
 
-from gamesight.domain.models import Evidence, GameEvent
+from gamesight.domain.models import AnalysisResult, EventType, Evidence, GameEvent
 from gamesight.evidence.models import EvidenceImage
 
 
@@ -73,18 +73,38 @@ class OpenCVScreenshotExtractor(ScreenshotExtractor):
             width = int(capture.get(self._cv2.CAP_PROP_FRAME_WIDTH))
             height = int(capture.get(self._cv2.CAP_PROP_FRAME_HEIGHT))
 
-            for event in events:
-                if len(images) >= self._max:
-                    break
+            candidates = [
+                (frame_idx, event)
+                for event in events
+                if (frame_idx := self._best_frame(event)) is not None
+            ]
+            candidates.sort(key=lambda item: item[0])
+            current_frame: int | None = None
+            cached_frame = None
+            sequential = hasattr(capture, "grab")
 
-                frame_idx = self._best_frame(event)
-                if frame_idx is None:
-                    continue
-
-                capture.set(self._cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                success, frame = capture.read()
+            for frame_idx, event in candidates[:self._max]:
+                if frame_idx == current_frame and cached_frame is not None:
+                    success, frame = True, cached_frame
+                elif sequential and current_frame is not None and frame_idx > current_frame:
+                    success = True
+                    # read() advances one frame; grab only the intervening
+                    # frames, then decode the requested target once.
+                    for _ in range(max(0, frame_idx - current_frame - 1)):
+                        if not capture.grab():
+                            success = False
+                            break
+                    if success:
+                        success, frame = capture.read()
+                    else:
+                        frame = None
+                else:
+                    capture.set(self._cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    success, frame = capture.read()
                 if not success:
                     continue
+                current_frame = frame_idx
+                cached_frame = frame
 
                 img_id = f"evidence_{event.event_id}"
                 img_path = out_dir / f"{img_id}.png"
@@ -114,3 +134,62 @@ class OpenCVScreenshotExtractor(ScreenshotExtractor):
                 return ev.frame_index
         # Fall back to timestamp * 10 (approximate for 30fps video)
         return int(event.start_sec * 30)
+
+
+def build_round_keyframe_events(
+    analysis: AnalysisResult,
+    samples_per_round: int = 2,
+    max_events: int = 30,
+) -> list[GameEvent]:
+    """Create evenly spaced representative-frame events for every round.
+
+    These synthetic events are used only for screenshot extraction and live
+    frame inspection.  They do not enter the match timeline or combat stats.
+    Sampling inside each round avoids freeze-time frames at the exact boundary.
+    """
+    if samples_per_round < 1 or max_events < 1:
+        return []
+
+    fps = analysis.metadata.fps or 30.0
+    video_end = analysis.metadata.duration_sec
+    events: list[GameEvent] = []
+    seen_frames: set[int] = set()
+
+    for round_analysis in analysis.rounds:
+        end_sec = round_analysis.end_sec
+        if end_sec is None:
+            end_sec = video_end
+        if end_sec is None or end_sec <= round_analysis.start_sec:
+            continue
+
+        duration = end_sec - round_analysis.start_sec
+        for sample_index in range(1, samples_per_round + 1):
+            fraction = sample_index / (samples_per_round + 1)
+            timestamp = round_analysis.start_sec + duration * fraction
+            frame_index = max(0, int(round(timestamp * fps)))
+            if frame_index in seen_frames:
+                continue
+            seen_frames.add(frame_index)
+
+            event_id = (
+                f"round_keyframe_{round_analysis.round_id}_{sample_index:02d}"
+            )
+            events.append(GameEvent(
+                event_id=event_id,
+                event_type=EventType.KEYFRAME,
+                start_sec=timestamp,
+                confidence=0.9,
+                evidence=[Evidence(
+                    frame_index=frame_index,
+                    timestamp_sec=timestamp,
+                    source="RoundKeyframeSampler",
+                )],
+                attributes={
+                    "round_id": round_analysis.round_id,
+                    "sample_index": sample_index,
+                },
+            ))
+            if len(events) >= max_events:
+                return events
+
+    return events

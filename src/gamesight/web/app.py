@@ -5,7 +5,7 @@ Usage: streamlit run src/gamesight/web/app.py
 
 from __future__ import annotations
 
-import io, json, tempfile, time
+import io, json, shutil, tempfile, time
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +17,10 @@ from gamesight.domain.models import AnalysisResult, EventType, GameEvent, RoundA
 from gamesight.events.aggregator import aggregate_events
 from gamesight.events.detectors import KillEventDetector, RoundBoundaryDetector
 from gamesight.events.ocr_detector import OCRRoundDetector
-from gamesight.evidence.extractor import OpenCVScreenshotExtractor
+from gamesight.evidence.extractor import (
+    OpenCVScreenshotExtractor,
+    build_round_keyframe_events,
+)
 from gamesight.i18n.loader import I18nLoader
 from gamesight.ingestion.video_reader import OpenCVVideoReader
 from gamesight.live.analyzer import LiveAnalyzer
@@ -27,6 +30,12 @@ from gamesight.perception.extractors import (
 )
 from gamesight.perception.hud_parser import CS2HudParser
 from gamesight.perception.hud_profiles import CS2_STANDARD_16X9
+from gamesight.perception.first_person import (
+    FirstPersonAnalyzer, build_first_person_summary_events,
+)
+from gamesight.perception.cs2_detector import (
+    CS2FactionDetector, PlayerDetectionSample, build_engagement_events,
+)
 from gamesight.reporting.builder import EvidenceReportBuilder
 from gamesight.web.demo import generate_demo_events, generate_demo_tracks
 
@@ -38,15 +47,13 @@ if "analysis_run" not in st.session_state:
         "tracks": None, "progress": 0, "status": "",
         "coach_suggestions": None, "coach_summary": None,
         "screenshots": None, "live_result": None, "locale": "en", "mode": "video", "debug_screenshots": [],
-        "player_filter": False, "player_name": "", "use_ocr": False, "use_yolo": False,
+        "player_filter": False, "player_name": "", "use_yolo": False,
     })
 
-MAX_TIME_REAL = 300    # 5 min max for real video
+MAX_TIME_REAL = 1800   # 30 min max for long real-video analysis
 MAX_TIME_DEMO = 60     # 1 min max for demo
-OCR_EVERY_N = 30       # Only pass image to OCR every N frames
-YOLO_EVERY_N = 5       # Only run YOLO every N frames
-
-
+HUD_SAMPLE_FPS = 2.0   # Round/HUD state does not need high-rate analysis.
+SCORE_OCR_INTERVAL_SEC = 2.0  # Score persists throughout freeze time.
 def _loader(): return I18nLoader(st.session_state.get("locale", "en"))
 def _t(key: str, **kwargs) -> str: return _loader().t(key, **kwargs)
 
@@ -64,10 +71,13 @@ def _filter_post_death(analysis: AnalysisResult) -> tuple[AnalysisResult, int]:
         new_end = death_ts if ra.end_sec and death_ts < ra.end_sec else ra.end_sec
         filtered_rounds.append(RoundAnalysis(round_id=ra.round_id, start_sec=ra.start_sec, end_sec=new_end, events=kept))
     return AnalysisResult(video=analysis.video, metadata=analysis.metadata, rounds=filtered_rounds,
-                          warnings=analysis.warnings), skipped
+                          warnings=analysis.warnings,
+                          capabilities=analysis.capabilities), skipped
 
 
-def _real_pipeline(video_path: str, sample_fps: float) -> dict:
+def _real_pipeline(
+    video_path: str, sample_fps: float, use_yolo: bool = False,
+) -> dict:
     t0 = time.time()
     st.session_state["status"] = _t("run.reading_meta"); st.session_state["progress"] = 5
     video = VideoInput(video_id=Path(video_path).stem, path=Path(video_path))
@@ -78,27 +88,76 @@ def _real_pipeline(video_path: str, sample_fps: float) -> dict:
     st.session_state["status"] = _t("run.processing", w=metadata.width or 0, h=metadata.height or 0, fps=metadata.fps or 0)
     st.session_state["progress"] = 10
 
+    # Personal K/D is intentionally disabled, so the video pipeline only
+    # needs native round information.  Crosshair/HP/kill-feed/money parsing
+    # remains available in the single-screenshot Live Analyzer.
     parser = CS2HudParser(CS2_STANDARD_16X9, {
-        "crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
-        "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(),
         "round_info": RoundInfoExtractor(),
     })
 
-    use_ocr = st.session_state.get("use_ocr", False)
     ocr_detector = OCRRoundDetector(profile=CS2_STANDARD_16X9)
-    if use_ocr and not ocr_detector.available:
-        st.warning("EasyOCR not installed. Run: pip install easyocr. Falling back to heuristic detection.")
-        use_ocr = False
+    use_score_ocr = ocr_detector.available
+    if not use_score_ocr:
+        st.warning("EasyOCR not installed. Run: pip install easyocr. Falling back to timer-gap round detection.")
 
     hud_states = []
+    score_events = []
+    first_person_analyzer = FirstPersonAnalyzer()
+    first_person_samples = []
+    player_detection_samples: list[PlayerDetectionSample] = []
+    faction_detector = None
+    if use_yolo:
+        model_path = Path(__file__).resolve().parents[3] / "models" / "yolov10n_cs2.pt"
+        try:
+            faction_detector = CS2FactionDetector(model_path=model_path)
+        except (FileNotFoundError, ImportError, RuntimeError) as exc:
+            st.warning(f"{_t('run.cs2_model_unavailable')} ({exc})")
+    # Run on every sampled frame.  At the recommended 2 FPS this retains
+    # half-second contacts that a one-pass-per-second schedule can miss.
+    yolo_every = 1
+    next_hud_timestamp = 0.0
+    last_score_ocr_timestamp: float | None = None
     for i, frame in enumerate(reader.frames(video, sample_fps)):
         if time.time() - t0 > MAX_TIME_REAL:
             st.warning(f"Analysis timed out after {MAX_TIME_REAL}s. Processing partial results.")
             break
-        state = parser.parse(frame.image, frame.frame_index, frame.timestamp_sec)
-        # Only pass full image to OCR every OCR_EVERY_N frames (sparse sampling)
-        img_for_ocr = frame.image if (use_ocr and i % OCR_EVERY_N == 0) else None
-        hud_states.append((state, img_for_ocr))
+        first_person_sample = first_person_analyzer.update(
+            frame.image, frame.frame_index, frame.timestamp_sec,
+        )
+        first_person_samples.append(first_person_sample)
+        if faction_detector is not None and i % yolo_every == 0:
+            detections = faction_detector.detect(
+                frame.image, frame.frame_index, frame.timestamp_sec,
+            )
+            player_detection_samples.append(PlayerDetectionSample(
+                frame_index=frame.frame_index,
+                timestamp_sec=frame.timestamp_sec,
+                player_team=first_person_sample.player_team,
+                detections=detections,
+            ))
+        if frame.timestamp_sec + 1e-6 >= next_hud_timestamp:
+            state = parser.parse(
+                frame.image, frame.frame_index, frame.timestamp_sec,
+            )
+            hud_states.append(state)
+            next_hud_timestamp = frame.timestamp_sec + 1.0 / HUD_SAMPLE_FPS
+            if use_score_ocr:
+                # Score digits persist across the round and freeze time.  A
+                # fixed 2-second OCR cadence still supplies the two confirmed
+                # reads required by OCRRoundDetector, but halves neural OCR
+                # work versus the former once-per-second schedule.  Timer-only
+                # HUD updates keep start-boundary precision at 0.5 seconds.
+                should_read_score = last_score_ocr_timestamp is None or (
+                    frame.timestamp_sec - last_score_ocr_timestamp
+                    >= SCORE_OCR_INTERVAL_SEC
+                )
+                score_events.extend(ocr_detector.update(
+                    state,
+                    frame.image if should_read_score else None,
+                    read_score=should_read_score,
+                ))
+                if should_read_score:
+                    last_score_ocr_timestamp = frame.timestamp_sec
         if i % 30 == 0:
             elapsed = time.time() - t0
             if i > 0:
@@ -113,23 +172,39 @@ def _real_pipeline(video_path: str, sample_fps: float) -> dict:
     st.session_state["status"] = _t("run.detecting_events", n=n_states)
     st.session_state["progress"] = 75
 
-    rbd = RoundBoundaryDetector(); ked = KillEventDetector()
-    events = []
-    if use_ocr:
-        for state, image in hud_states:
-            if image is not None:
-                events.extend(ocr_detector.update(state, image))
+    rbd = RoundBoundaryDetector()
+    # Brightness-only HUD heuristics cannot tell whether a kill-feed entry is
+    # the POV player's kill, and the current colour-based HP estimate is not a
+    # reliable death signal on custom HUDs.  Keep personal combat totals off
+    # until identity-aware OCR is available rather than reporting false stats.
+    ked = KillEventDetector(detect_deaths=False, detect_kills=False)
+    events = list(score_events)
+    if use_score_ocr:
+        for state in hud_states:
             events.extend(ked.update(state))
         events.extend(ocr_detector.finalize())
     else:
-        for state, _ in hud_states:
+        for state in hud_states:
             events.extend(rbd.update(state)); events.extend(ked.update(state))
         events.extend(rbd.finalize())
     events.extend(ked.finalize())
 
     rounds = aggregate_events(events)
+    engagement_events = build_engagement_events(rounds, player_detection_samples)
+    events.extend(engagement_events)
+    events.extend(build_first_person_summary_events(rounds, first_person_samples))
+    rounds = aggregate_events(events)
     st.session_state["progress"] = 85
-    analysis = AnalysisResult(video=video, metadata=metadata, rounds=rounds)
+    analysis = AnalysisResult(
+        video=video,
+        metadata=metadata,
+        rounds=rounds,
+        warnings=[_t("run.personal_combat_unavailable")],
+        capabilities={
+            "personal_combat": False,
+            "enemy_contact": faction_detector is not None,
+        },
+    )
     if st.session_state.get("player_filter"):
         analysis, skipped = _filter_post_death(analysis)
         if skipped: st.session_state["status"] += f" ({_t('player_filter.skipped_frames', n=skipped)})"
@@ -152,7 +227,8 @@ def _demo_pipeline() -> dict:
     st.session_state["progress"] = 60
     analysis = AnalysisResult(
         video=VideoInput(video_id="demo_cs2_match", path=Path("demo.mp4")),
-        metadata=VideoMetadata(duration_sec=640.0, fps=30.0, width=1920, height=1080), rounds=rounds)
+        metadata=VideoMetadata(duration_sec=640.0, fps=30.0, width=1920, height=1080), rounds=rounds,
+        capabilities={"personal_combat": True})
     if st.session_state.get("player_filter"): analysis, _ = _filter_post_death(analysis)
     st.session_state["analysis_obj"] = analysis; st.session_state["tracks"] = tracks
     coach = RuleBasedCoach(_loader()); builder = EvidenceReportBuilder(loader=_loader())
@@ -232,23 +308,23 @@ with st.sidebar:
             pn = st.text_input(_t("sidebar.player_name"), value=st.session_state.get("player_name", ""), help=_t("sidebar.player_name_help"))
             st.session_state["player_name"] = pn; st.caption(_t("player_filter.active"))
         st.divider()
-        st.subheader(f"🧠 {_t("sidebar.ai_features")}")
-        use_ocr = st.checkbox(_t("sidebar.ocr_label"), value=st.session_state.get("use_ocr", False), help=_t("sidebar.ocr_help"))
-        st.session_state["use_ocr"] = use_ocr
+        st.subheader(f"🧠 {_t('sidebar.ai_features')}")
+        st.caption(_t("sidebar.ocr_automatic"))
         use_yolo = st.checkbox(_t("sidebar.yolo_label"), value=st.session_state.get("use_yolo", False), help=_t("sidebar.yolo_help"))
         st.session_state["use_yolo"] = use_yolo
         st.divider()
         st.subheader(f"⚙️ {_t('sidebar.settings')}")
         sample_fps = st.slider(_t("sidebar.sample_fps"), 1, 30, 10, help=_t("sidebar.sample_fps_help"))
+        st.caption(_t("sidebar.sampling_strategy", fps=sample_fps))
     else:
-        use_demo = False; uploaded = None; use_ocr = False; use_yolo = False; pf = False; sample_fps = 10
+        use_demo = False; uploaded = None; use_yolo = False; pf = False; sample_fps = 10
         st.subheader("📸 Upload Screenshots")
         debug_files = st.file_uploader("Select CS2 screenshots", type=["jpg", "jpeg", "png"],
                                        accept_multiple_files=True, key="debug_upload")
         if debug_files:
             st.session_state["debug_screenshots"] = debug_files
             st.caption(f"{len(debug_files)} screenshot(s) loaded")
-    st.divider(); st.caption(f"{_t('app.version')} | 388 tests")
+    st.divider(); st.caption(f"{_t('app.version')} | 411 tests")
 
 if st.session_state.get("mode") == "screenshot":
     # ---- Screenshot Debug Mode ----
@@ -314,17 +390,46 @@ if run_clicked:
     with st.spinner(_t("loading")):
         if use_demo: result = _demo_pipeline()
         else:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as f:
-                f.write(uploaded.read()); video_path = f.name
+            upload_suffix = Path(uploaded.name).suffix.lower() or ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=upload_suffix) as f:
+                uploaded.seek(0)
+                shutil.copyfileobj(uploaded, f, length=8 * 1024 * 1024)
+                video_path = f.name
             try:
-                result = _real_pipeline(video_path, sample_fps)
-                extractor = OpenCVScreenshotExtractor(max_screenshots=30)
+                result = _real_pipeline(video_path, sample_fps, use_yolo=use_yolo)
+                extractor = OpenCVScreenshotExtractor(max_screenshots=72)
                 analysis = st.session_state.get("analysis_obj")
                 if analysis is not None:
-                    # Skip freeze-time events (< 12s after round start).
-                    important = [e for r in analysis.rounds for e in r.events
-                                 if e.event_type.value in ("player_kill", "player_death")
-                                 and (e.start_sec - r.start_sec) > 12.0]
+                    # Always provide representative gameplay frames even when
+                    # personal kill/death detection is intentionally disabled.
+                    phase_frames = build_round_keyframe_events(
+                        analysis, samples_per_round=3, max_events=54,
+                    )
+                    # Include the exact frame that triggered each viewport
+                    # summary so first-person advice has visible evidence.
+                    verified_events = [
+                        event for round_analysis in analysis.rounds
+                        for event in round_analysis.events
+                        if event.event_type in (
+                            EventType.FIRST_PERSON_SUMMARY,
+                            EventType.FIRST_PERSON_MOMENT,
+                            EventType.ENGAGEMENT_CANDIDATE,
+                        )
+                    ]
+                    # Evidence-triggered moments get capacity first.  This
+                    # prevents late-round gunfights from being crowded out by
+                    # generic phase frames when the 72-image cap is reached.
+                    important = verified_events[:72]
+                    important.extend(phase_frames[:max(0, 72 - len(important))])
+                    important.sort(key=lambda event: event.start_sec)
+                    # Preserve room for reliable personal events when an
+                    # identity-aware detector is enabled in the future.
+                    combat_events = [
+                        e for r in analysis.rounds for e in r.events
+                        if e.event_type in (EventType.PLAYER_KILL, EventType.PLAYER_DEATH)
+                        and (e.start_sec - r.start_sec) > 12.0
+                    ]
+                    important.extend(combat_events[:max(0, 40 - len(important))])
                     st.session_state["screenshots"] = extractor.extract(video_path, important)
             finally: Path(video_path).unlink(missing_ok=True)
         st.session_state["result"] = result; st.rerun()
@@ -351,17 +456,30 @@ with t1:
     ov = result["overview"]
     st.subheader(_t("overview.match_overview"))
     cols = st.columns(5)
+    combat_available = ov.get("personal_combat_available", True)
     cols[0].metric(_t("overview.video"), ov["video_id"]); cols[1].metric(_t("overview.rounds"), ov["total_rounds"])
     cols[2].metric(_t("overview.duration"), f"{ov.get('duration_sec',0):.0f}s" if ov.get("duration_sec") else "N/A")
-    cols[3].metric(_t("overview.kills"), ov["total_kills_detected"]); cols[4].metric(_t("overview.deaths"), ov["total_deaths_detected"])
+    cols[3].metric(_t("overview.kills"), ov["total_kills_detected"] if combat_available else "—"); cols[4].metric(_t("overview.deaths"), ov["total_deaths_detected"] if combat_available else "—")
     st.divider(); st.subheader(_t("overview.round_summary"))
     rows = []
     for r in result.get("rounds", []):
         s = r["stats"]
-        rows.append({_t("overview.round"): r["round_id"], _t("overview.duration"): f"{r.get('duration_sec',0):.1f}s" if r.get("duration_sec") else "-",
-                     _t("overview.kills"): s["kills_detected"], _t("overview.player_died"): "Yes" if s.get("player_died") else "No",
-                     _t("overview.killfeed"): s["killfeed_events"], _t("overview.enemy_tracks"): s["enemy_tracks"],
-                     _t("overview.first_enemy"): f"{s.get('enemy_first_visible_sec',0):.1f}s" if s.get("enemy_first_visible_sec") else "-"})
+        row = {
+            _t("overview.round"): r["round_id"],
+            _t("overview.duration"): f"{r.get('duration_sec',0):.1f}s" if r.get("duration_sec") else "-",
+            _t("overview.flash"): f"{s.get('flash_count', 0)} / {s.get('flash_exposure_sec', 0):.1f}s",
+            _t("overview.scoped"): f"{s.get('scoped_sec', 0):.1f}s",
+            _t("overview.view_motion"): f"{s.get('view_motion_avg', 0):.2f}",
+            _t("overview.stationary"): f"{s.get('stationary_ratio', 0) * 100:.0f}%",
+            _t("overview.engagements"): s.get("engagement_windows", 0),
+        }
+        if combat_available:
+            row.update({
+                _t("overview.kills"): s["kills_detected"],
+                _t("overview.player_died"): "Yes" if s.get("player_died") else "No",
+                _t("overview.killfeed"): s["killfeed_events"],
+            })
+        rows.append(row)
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
 # Timeline
@@ -392,8 +510,17 @@ with t3:
         st.markdown(f"### {r['round_id']}")
         if r.get("duration_sec"): st.caption(f"{_t('report.duration_label')}: {r['duration_sec']:.1f}s")
         s = r["stats"]; c1,c2,c3,c4 = st.columns(4)
-        c1.metric(_t("report.kills_label"), s["kills_detected"]); c2.metric(_t("report.deaths_label"), s["deaths_detected"])
-        surv = f"{s["survival_sec"]:.0f}s" if s.get("survival_sec") else "N/A"; c3.metric(_t("report.survival_label"), surv); c4.metric(_t("report.enemies_label"), s.get("enemies_encountered", s.get("enemy_tracks", 0)))
+        if combat_available:
+            c1.metric(_t("report.kills_label"), s["kills_detected"])
+            c2.metric(_t("report.deaths_label"), s["deaths_detected"])
+            surv = f"{s['survival_sec']:.0f}s" if s.get("survival_sec") else "N/A"
+            c3.metric(_t("report.survival_label"), surv)
+            c4.metric(_t("report.enemies_label"), s.get("enemies_encountered", s.get("enemy_tracks", 0)))
+        else:
+            c1.metric(_t("overview.flash"), f"{s.get('flash_count', 0)} / {s.get('flash_exposure_sec', 0):.1f}s")
+            c2.metric(_t("overview.scoped"), f"{s.get('scoped_sec', 0):.1f}s")
+            c3.metric(_t("overview.view_motion"), f"{s.get('view_motion_avg', 0):.2f}")
+            c4.metric(_t("overview.stationary"), f"{s.get('stationary_ratio', 0) * 100:.0f}%")
 
         for f in r.get("findings", []):
             icon = {"info":"(i)","warning":"(!)","critical":"(!!)"}.get(f["severity"], ""); st.markdown(f"{icon} {f['text']}")
@@ -414,6 +541,8 @@ with t4:
 # Coach
 with t5:
     st.subheader(f"\U0001f9e0 {_t('coach.title')}"); st.caption(_t("coach.subtitle"))
+    if not combat_available:
+        st.info(_t("coach.first_person_coverage"))
     if not coach_suggestions: st.info(_t("coach.no_suggestions"))
     else:
         for s in coach_suggestions:
@@ -435,18 +564,18 @@ with t5:
                     with st.expander(_t("coach.evidence"), expanded=False):
                         for lk in s.evidence: st.caption(f"frame={lk.frame_index or '?'} | t={lk.timestamp_sec:.1f}s | {lk.source}")
     if coach_summary:
-        st.divider(); st.subheader(f"\U0001f3c6 {_t("summary_title")}")
-        st.markdown(f"**{_t("assessment")}:** {coach_summary.overall_assessment}")
+        st.divider(); st.subheader(f"\U0001f3c6 {_t('summary_title')}")
+        st.markdown(f"**{_t('assessment')}:** {coach_summary.overall_assessment}")
         ca,cb = st.columns(2)
         with ca:
-            st.markdown(f"### {_t("strengths")}")
+            st.markdown(f"### {_t('strengths')}")
             for item in coach_summary.strengths: st.markdown(f"- {item}")
-            st.markdown(f"### {_t("focus_areas")}")
+            st.markdown(f"### {_t('focus_areas')}")
             for item in coach_summary.focus_areas: st.markdown(f"- {item}")
         with cb:
-            st.markdown(f"### {_t("weaknesses")}")
+            st.markdown(f"### {_t('weaknesses')}")
             for item in coach_summary.weaknesses: st.markdown(f"- {item}")
-            st.markdown(f"### {_t("practice_drills")}")
+            st.markdown(f"### {_t('practice_drills')}")
             for item in coach_summary.practice_drills: st.markdown(f"- {item}")
 
 # Live
@@ -479,11 +608,16 @@ with t6:
         key_events = st.session_state.get("screenshots")
         if key_events:
             cols = st.columns(5)
-            for i, img in enumerate(key_events[:10]):
+            for i, img in enumerate(key_events):
                 col_idx = i % 5
                 if img.exists():
                     with cols[col_idx]:
-                        st.image(str(img.image_path), caption=f"t={img.timestamp_sec:.1f}s", width=150)
+                        round_label = img.event_id.removeprefix("round_keyframe_").rsplit("_", 1)[0]
+                        st.image(
+                            str(img.image_path),
+                            caption=f"{round_label} | t={img.timestamp_sec:.1f}s",
+                            width=150,
+                        )
                         if st.button(f"Analyze", key=f"live_frame_{i}"):
                             pil_img = Image.open(str(img.image_path)).convert("RGB")
                             frame = np.array(pil_img)[:,:,::-1].copy()

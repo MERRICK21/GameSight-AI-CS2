@@ -52,15 +52,30 @@ class OCRRoundDetector(EventEngine):
         self._min_duration = min_round_duration_sec
         self._seq_counter = 0       # sequential round counter (1-based)
         self._last_round_num = 0
+        self._last_score_total: int | None = None
+        self._score_candidate: tuple[int, int] | None = None
+        self._score_candidate_count = 0
         self._last_start_ts: float | None = None
+        self._awaiting_start = False
+        self._pending_scores: tuple[int, int] = (0, 0)
+        self._timer_candidate_count = 0
         self._pending: list[GameEvent] = []
 
     @property
     def available(self) -> bool:
         return self._reader.available
 
+    @property
+    def awaiting_start(self) -> bool:
+        """Whether a confirmed score is waiting for the timer to reappear."""
+        return self._awaiting_start
+
     def update(
-        self, hud_state: HudState, image: NDArray[np.uint8] | None = None, tracks=()
+        self,
+        hud_state: HudState,
+        image: NDArray[np.uint8] | None = None,
+        tracks=(),
+        read_score: bool = True,
     ) -> Sequence[GameEvent]:
         """Must pass *image* (the full frame).  The detector crops the
         round_info region internally before calling OCR.
@@ -69,21 +84,49 @@ class OCRRoundDetector(EventEngine):
         """
         self._pending.clear()
 
-        if image is None:
-            return ()
+        score_confirmed = False
+        ct_score = t_score = 0
+        if read_score:
+            if image is None:
+                return ()
+            # Crop to round_info region so OCR only sees the scores.
+            crop = self._crop_round_info(image)
+            if crop is None:
+                return ()
+            result = self._reader.read(
+                crop, hud_state.frame_index, hud_state.timestamp_sec,
+            )
+            ct_score = int(result.get("ct_score", 0))
+            t_score = int(result.get("t_score", 0))
+            score_total = ct_score + t_score
+            if score_total < 0 or score_total >= _MAX_ROUND_NUMBER:
+                return ()
 
-        # Crop to round_info region so OCR only sees the scores.
-        crop = self._crop_round_info(image)
-        if crop is None:
-            return ()
+            if self._last_score_total is None:
+                self._last_score_total = score_total
+                score_confirmed = True
+            elif score_total == self._last_score_total + 1:
+                candidate = (ct_score, t_score)
+                if candidate == self._score_candidate:
+                    self._score_candidate_count += 1
+                else:
+                    self._score_candidate = candidate
+                    self._score_candidate_count = 1
+                if self._score_candidate_count >= 2:
+                    self._last_score_total = score_total
+                    self._score_candidate = None
+                    self._score_candidate_count = 0
+                    score_confirmed = True
+            elif score_total == self._last_score_total:
+                self._score_candidate = None
+                self._score_candidate_count = 0
+            else:
+                # A native score can only advance by one.  Ignore OCR jumps,
+                # regressions, portraits, and separator artefacts.
+                self._score_candidate = None
+                self._score_candidate_count = 0
 
-        result = self._reader.read(crop, hud_state.frame_index, hud_state.timestamp_sec)
-        round_num = result.get("round_number", 0)
-
-        # Clamp to plausible CS2 range.
-        round_num = max(1, min(round_num, _MAX_ROUND_NUMBER))
-
-        if round_num > self._last_round_num:
+        if score_confirmed:
             # New round detected via score change.
             if self._last_start_ts is not None:
                 delta = hud_state.timestamp_sec - self._last_start_ts
@@ -103,11 +146,32 @@ class OCRRoundDetector(EventEngine):
                         attributes={"round_id": prev_rid},
                     ))
 
+            self._last_round_num = score_total + 1
+            self._pending_scores = (
+                ct_score, t_score
+            )
+            self._awaiting_start = True
+            self._timer_candidate_count = 0
+
+        # Score changes are visible on the end screen.  Open the next round
+        # only once the native timer is visible again; this avoids creating a
+        # phantom trailing round when the video ends on a final scoreboard.
+        timer_visible = bool(
+            hud_state.values.get("round_info.timer_visible", False)
+        )
+        if self._awaiting_start:
+            if timer_visible:
+                self._timer_candidate_count += 1
+            else:
+                self._timer_candidate_count = 0
+        if self._awaiting_start and self._timer_candidate_count >= 2:
+            ct, t = self._pending_scores
             # Start new round -- use sequential counter, not raw OCR value.
             self._seq_counter += 1
             rid = f"round_{self._seq_counter:03d}"
             self._last_start_ts = hud_state.timestamp_sec
-            self._last_round_num = round_num
+            self._awaiting_start = False
+            self._timer_candidate_count = 0
             self._pending.append(GameEvent(
                 event_id=f"round_start_{rid}",
                 event_type=EventType.ROUND_START,
@@ -120,8 +184,8 @@ class OCRRoundDetector(EventEngine):
                 )],
                 attributes={
                     "round_id": rid,
-                    "ct_score": result.get("ct_score", 0),
-                    "t_score": result.get("t_score", 0),
+                    "ct_score": ct,
+                    "t_score": t,
                 },
             ))
 
@@ -130,7 +194,13 @@ class OCRRoundDetector(EventEngine):
     def finalize(self) -> Sequence[GameEvent]:
         self._seq_counter = 0
         self._last_round_num = 0
+        self._last_score_total = None
+        self._score_candidate = None
+        self._score_candidate_count = 0
         self._last_start_ts = None
+        self._awaiting_start = False
+        self._pending_scores = (0, 0)
+        self._timer_candidate_count = 0
         self._pending.clear()
         return ()
 

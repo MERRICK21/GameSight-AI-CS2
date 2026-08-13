@@ -2,14 +2,20 @@
 
 Every finding in the report carries explicit evidence links that trace
 back to specific frames, timestamps, and pipeline sources.  This makes
-the report auditable — whether the narrative text comes from an LLM or
+the report auditable 鈥?whether the narrative text comes from an LLM or
 from a deterministic template, every claim has a paper trail.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    class StrEnum(str, Enum):
+        pass
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -74,6 +80,14 @@ class RoundStats(BaseModel):
     teammate_tracks: int = 0
     enemy_first_visible_sec: float | None = None
     combat_segments: int = 0
+    personal_combat_available: bool = True
+    flash_count: int = 0
+    flash_exposure_sec: float = 0.0
+    scoped_sec: float = 0.0
+    scoped_ratio: float = 0.0
+    view_motion_avg: float = 0.0
+    stationary_ratio: float = 0.0
+    engagement_windows: int = 0
 
 
 class RoundReport(BaseModel):
@@ -102,6 +116,8 @@ class MatchOverview(BaseModel):
     total_enemies_encountered: int = 0
     avg_survival_sec: float | None = None
     warnings: list[str] = Field(default_factory=list)
+    personal_combat_available: bool = True
+    total_engagement_windows: int = 0
 
 
 class MatchReport(BaseModel):

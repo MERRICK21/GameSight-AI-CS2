@@ -2,7 +2,36 @@
 
 ## Current Status
 
-**Active development** -- GPU acceleration enabled, all 396 tests passing.
+**Active development** -- GPU acceleration enabled, full test suite passing.
+
+---
+
+## Latest Fixes (2026-08-13)
+
+### Real-video accuracy
+- **Round detection validated on `test_video/test1.mp4`**: native scoreboard OCR reconstructs the complete 0:0 to 13:5 score sequence and all 18 rounds at 2 analysis FPS.
+- **OCR noise rejection**: score changes must increase the total by exactly one and remain stable across two reads; portraits and separator artefacts are ignored.
+- **False personal combat totals disabled**: generic kill-feed brightness and HUD colour estimates no longer produce fabricated kills/deaths.
+- **Watermark exclusion clarified**: creator IDs and video overlays are not treated as CS2 player identity or gameplay evidence.
+- **Representative keyframes restored**: three interior gameplay frames per round (up to 54), plus verified visual moments, remain available in the Live Analysis tab even without personal combat events.
+- **First-person visual analysis added**: per-round flash exposure, scoped time, view-motion score, and stationary-view ratio are computed from the central gameplay viewport.
+- **Creator overlays excluded by design**: motion analysis crops HUD edges and the bottom watermark band; names such as “幽羽” are never used as player identity or gameplay evidence.
+- **Evidence-based first-person coaching**: substantial flash exposure and long continuous scope holds produce localized, auditable suggestions with source-frame links.
+- **Motion inference corrected**: viewport activity is descriptive only; opening traversal, turning, and weapon switching no longer generate unsupported “aim not settled” advice.
+- **Multiple moments per round**: continuous flash and scope episodes retain their own timestamps/evidence, alongside three post-opening/mid/late representative frames per round.
+- **Real engagement windows added**: the optional CS2-specific detector distinguishes native T/CT character classes and only creates a review event when the detected faction opposes the POV player's native bottom-centre team HUD.
+- **Teammates no longer trigger combat advice**: validation around 50–100 seconds of `test1.mp4` retained T models as teammates and generated evidence only for CT appearances.
+- **Grounded encounter coaching**: up to three confirmed enemy-visible windows per round prompt a review of the surrounding two seconds (pre-aim, cover, disengage/trade conditions) without claiming aim quality from one frame.
+- **Evidence screenshots prioritised**: confirmed engagement/flash/scope frames now consume screenshot capacity before generic phase samples, so late gunfights are not dropped by the 72-image limit.
+- **10 FPS long-video path accelerated**: visual effects retain the selected rate, while round HUD parsing runs at 2 FPS, only the required round-info region is parsed, first-person analysis uses a 640px working frame, and score OCR runs every 2 seconds.
+- **Real-video performance validated**: `test1.mp4` (1162 seconds) completed the 10 FPS core pass without engagement detection in about 123 seconds while still reconstructing all 18 rounds.
+- **Repository hygiene**: local recordings in `test_video/` and optional model weights in `models/` are excluded from Git so large or licensed assets are not uploaded.
+
+### Web application
+- **Upload capacity increased to 2 GB** with chunked temporary-file copying and a 30-minute real-analysis timeout.
+- **Streamlit Python 3.11 compilation errors fixed** in translated f-strings.
+- **Current limitation is explicit**: personal kills/deaths stay unavailable until native CS2 HUD signals can be attributed reliably.
+- **Unavailable data is no longer shown as zero**: K/D fields render as `—`, and combat-based coaching is withheld instead of generating false "no combat" advice.
 
 ---
 
@@ -90,8 +119,8 @@
 - **Live Analysis tab**: single-screenshot tactical advice (HP, armour, crosshair, kill-feed)
 - **Score-based round detection**: `RoundInfoExtractor` now detects CT (blue) and T (yellow) score colours
 - **Full Chinese localization**: all UI labels, coach advice, report findings, summary headings
-- **Upload limit**: 500MB via `.streamlit/config.toml`
-- **Performance**: OCR sparse sampling (every 30 frames), 5-min timeout, ETA display
+- **Upload limit**: 2GB via `.streamlit/config.toml`
+- **Performance**: split-rate visual/HUD processing, 2-second score OCR cadence, 30-minute timeout, ETA display
 - **GPU acceleration**: PyTorch CUDA 12.4, EasyOCR GPU, YOLO CUDA device, sequential video reader
 
 ---
@@ -101,8 +130,9 @@
 ```
 VideoInput -> OpenCVVideoReader -> VideoFrame
     +-> CS2HudParser -> HudState (crosshair, HP, armour, kill feed, money, round info + scores)
-    +-> [YOLODetector -> PlayerClassifier -> IOUTracker -> Track[]]  (optional, GPU-accelerated)
-    -> Event Engine -> GameEvent[] (round_start/end, player_kill, player_death, enemy_first_visible)
+    +-> FirstPersonAnalyzer -> flash/scope/view-motion + native POV team samples
+    +-> [CS2FactionDetector -> T/CT bodies -> opposing-faction samples]  (optional, GPU-accelerated)
+    -> Event Engine -> GameEvent[] (round_start/end, enemy_first_visible, engagement_candidate, visual moments)
     -> EventAggregator -> RoundAnalysis[]
     -> TimelineBuilder -> MatchTimeline -> JSON export
 EvidenceReportBuilder -> MatchReport -> JSON export
@@ -115,7 +145,7 @@ OpenCVScreenshotExtractor -> EvidenceImage[]
 
 ## Test Summary
 
-**396 passing**, 0 failures.
+**411 passing**, 0 failures.
 
 | Module | Tests |
 |--------|-------|
@@ -136,13 +166,13 @@ OpenCVScreenshotExtractor -> EvidenceImage[]
 ## Known Issues & Planned Improvements
 
 ### P0 -- Must Fix
-- [ ] **Round detection accuracy**: score-colour heuristic needs field validation with real CS2 footage. Blue/yellow thresholds may need per-map calibration.
+- [x] **Round detection accuracy for the current 16:9 recording**: validated at 18/18 rounds from the native 0:0 to 13:5 scoreboard sequence.
 - [ ] **Speed with OCR enabled**: EasyOCR is now GPU-accelerated but still has overhead; consider Tesseract or on-demand OCR only on keyframes.
 
 ### P1 -- Should Do
-- [ ] **AI Coach specificity**: current suggestions are template-based. With OCR reading player names + kill-feed text, suggestions can reference specific weapons, opponents, and map positions.
-- [ ] **Real YOLO integration**: YOLO detector exists (GPU-ready) but needs testing with real CS2 video footage.
-- [ ] **Player name OCR matching**: use `PlayerNameReader` to verify whose POV is active, enabling true player-ID filtering.
+- [ ] **AI Coach specificity**: flash/scope and confirmed engagement-window suggestions are now evidence-based; map positions and weapon-aware advice remain future work.
+- [x] **Real CS2 model integration**: optional GPU inference has been validated on real footage for T/CT separation and enemy-contact evidence. The non-commercial model remains an uncommitted local dependency; see `docs/CS2_ENEMY_MODEL.md`.
+- [ ] **Native personal combat attribution**: use CS2 kill-feed highlighting, HP/death transitions, and first-person HUD state; ignore creator watermarks.
 - [ ] **Weapon detection**: OCR on the bottom-right weapon/utility area to know what guns and utility the player has.
 - [ ] **Minimap analysis**: track player dot on minimap for positioning, rotation speed, and map control analysis.
 

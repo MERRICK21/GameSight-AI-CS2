@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
+
+# Python 3.11+ has StrEnum; fallback for older versions.
+try:
+    from enum import StrEnum
+except ImportError:
+    class StrEnum(str, Enum):
+        pass
 
 from pydantic import BaseModel, Field
 
@@ -71,6 +78,10 @@ class EventType(StrEnum):
     COMBAT_END = "combat_end"
     BOMB_PLANTED = "bomb_planted"
     BOMB_DEFUSED = "bomb_defused"
+    KEYFRAME = "keyframe"
+    FIRST_PERSON_SUMMARY = "first_person_summary"
+    FIRST_PERSON_MOMENT = "first_person_moment"
+    ENGAGEMENT_CANDIDATE = "engagement_candidate"
 
 
 class VideoInput(BaseModel):
@@ -143,3 +154,4 @@ class AnalysisResult(BaseModel):
     metadata: VideoMetadata
     rounds: list[RoundAnalysis] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    capabilities: dict[str, bool] = Field(default_factory=dict)
