@@ -10,11 +10,12 @@ from __future__ import annotations
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from fractions import Fraction
 from importlib import import_module
 from pathlib import Path
 
 from gamesight.domain.models import AnalysisResult, EventType, Evidence, GameEvent
-from gamesight.evidence.models import EvidenceImage
+from gamesight.evidence.models import EvidenceClip, EvidenceImage
 
 
 class ScreenshotExtractor(ABC):
@@ -134,6 +135,129 @@ class OpenCVScreenshotExtractor(ScreenshotExtractor):
                 return ev.frame_index
         # Fall back to timestamp * 10 (approximate for 30fps video)
         return int(event.start_sec * 30)
+
+
+class EvidenceClipExtractor:
+    """Encode short browser-compatible H.264 clips around verified events."""
+
+    def __init__(
+        self,
+        cv2_module: object | None = None,
+        before_sec: float = 2.0,
+        after_sec: float = 3.0,
+        max_clips: int = 12,
+        output_fps: float = 15.0,
+        max_width: int = 960,
+    ) -> None:
+        self._cv2 = cv2_module if cv2_module is not None else import_module("cv2")
+        self._before = max(0.0, before_sec)
+        self._after = max(0.0, after_sec)
+        self._max = max(0, max_clips)
+        self._output_fps = max(1.0, output_fps)
+        self._max_width = max(2, max_width)
+
+    def extract(
+        self,
+        video_path: str | Path,
+        events: Sequence[GameEvent],
+        output_dir: Path | None = None,
+    ) -> list[EvidenceClip]:
+        try:
+            import av
+        except ImportError as exc:
+            raise ImportError(
+                "Evidence clips require PyAV. Install with: pip install av"
+            ) from exc
+
+        out_dir = output_dir or Path(tempfile.mkdtemp(prefix="gamesight_clips_"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        capture = self._cv2.VideoCapture(str(video_path))
+        clips: list[EvidenceClip] = []
+        try:
+            if not capture.isOpened() or self._max == 0:
+                return clips
+            native_fps = float(capture.get(self._cv2.CAP_PROP_FPS))
+            frame_count = int(capture.get(self._cv2.CAP_PROP_FRAME_COUNT))
+            source_width = int(capture.get(self._cv2.CAP_PROP_FRAME_WIDTH))
+            source_height = int(capture.get(self._cv2.CAP_PROP_FRAME_HEIGHT))
+            if native_fps <= 0 or frame_count <= 0 or source_width <= 0 or source_height <= 0:
+                return clips
+            duration = frame_count / native_fps
+            scale = min(1.0, self._max_width / source_width)
+            width = max(2, int(source_width * scale) // 2 * 2)
+            height = max(2, int(source_height * scale) // 2 * 2)
+            target_fps = min(native_fps, self._output_fps)
+            frame_step = max(1, int(round(native_fps / target_fps)))
+            actual_fps = native_fps / frame_step
+
+            seen: set[str] = set()
+            selected: list[GameEvent] = []
+            for event in events:
+                if event.event_id not in seen:
+                    selected.append(event)
+                    seen.add(event.event_id)
+                if len(selected) >= self._max:
+                    break
+
+            for event in selected:
+                trigger = float(event.attributes.get("clip_trigger_sec", event.start_sec))
+                start_sec = max(0.0, trigger - self._before)
+                end_sec = min(duration, trigger + self._after)
+                if end_sec <= start_sec:
+                    continue
+                clip_path = out_dir / f"clip_{event.event_id}.mp4"
+                start_frame = max(0, int(start_sec * native_fps))
+                end_frame = min(frame_count, int(end_sec * native_fps))
+                capture.set(self._cv2.CAP_PROP_POS_FRAMES, start_frame)
+                container = av.open(
+                    str(clip_path), mode="w", options={"movflags": "+faststart"},
+                )
+                stream = container.add_stream(
+                    "libx264", rate=Fraction(actual_fps).limit_denominator(1000),
+                )
+                stream.width = width
+                stream.height = height
+                stream.pix_fmt = "yuv420p"
+                stream.options = {"crf": "25", "preset": "veryfast"}
+                encoded = 0
+                try:
+                    for frame_index in range(start_frame, end_frame):
+                        success, image = capture.read()
+                        if not success:
+                            break
+                        if (frame_index - start_frame) % frame_step:
+                            continue
+                        if image.shape[1] != width or image.shape[0] != height:
+                            image = self._cv2.resize(
+                                image, (width, height),
+                                interpolation=self._cv2.INTER_AREA,
+                            )
+                        video_frame = av.VideoFrame.from_ndarray(image, format="bgr24")
+                        for packet in stream.encode(video_frame):
+                            container.mux(packet)
+                        encoded += 1
+                    for packet in stream.encode():
+                        container.mux(packet)
+                finally:
+                    container.close()
+                if encoded == 0 or not clip_path.is_file():
+                    clip_path.unlink(missing_ok=True)
+                    continue
+                clips.append(EvidenceClip(
+                    clip_id=f"clip_{event.event_id}",
+                    event_id=event.event_id,
+                    trigger_sec=trigger,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    video_path=str(clip_path.resolve()),
+                    source=(event.evidence[0].source if event.evidence else "unknown"),
+                    width=width,
+                    height=height,
+                    fps=round(actual_fps, 3),
+                ))
+        finally:
+            capture.release()
+        return clips
 
 
 def build_round_keyframe_events(

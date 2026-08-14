@@ -2,6 +2,8 @@
 
 Only the gameplay viewport and native screen effects are measured.  Bottom
 overlays, creator watermarks, names, chat, and kill-feed text are excluded.
+The native kill-feed's local-player highlight frame is measured geometrically;
+no name or other feed text is read.
 """
 
 from __future__ import annotations
@@ -23,6 +25,18 @@ class FirstPersonSample:
     scoped: bool
     motion_score: float | None
     player_team: str | None = None
+    shot_candidate: bool = False
+    damage_candidate: bool = False
+    shot_signal_score: float = 0.0
+    damage_signal_score: float = 0.0
+    health_hud_visible: bool = False
+    health_hud_score: float = 0.0
+    local_kill_highlight: bool = False
+    local_kill_highlight_score: float = 0.0
+    # Encoded crops of native red-highlighted kill-feed rows.  They are used
+    # only to recognise a row that persists or moves in the feed; names are
+    # never interpreted for player identity or exposed in the report.
+    local_kill_row_fingerprints: tuple[bytes, ...] = ()
 
 
 class FirstPersonAnalyzer:
@@ -32,6 +46,8 @@ class FirstPersonAnalyzer:
         self._previous: NDArray[np.uint8] | None = None
         self._previous_ts: float | None = None
         self._player_team: str | None = None
+        self._previous_muzzle_mask: NDArray[np.bool_] | None = None
+        self._red_edge_baseline: tuple[float, float] | None = None
 
     def update(
         self, image: NDArray[np.uint8], frame_index: int, timestamp_sec: float
@@ -49,6 +65,7 @@ class FirstPersonAnalyzer:
         else:
             working = image
         gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(working, cv2.COLOR_BGR2HSV)
         h, w = gray.shape[:2]
 
         mean = float(gray.mean())
@@ -84,6 +101,22 @@ class FirstPersonAnalyzer:
         if detected_team is not None:
             self._player_team = detected_team
 
+        shot_score, damage_score = self._combat_signal_scores(hsv)
+        health_hud_score, health_hud_visible = _native_health_hud(working)
+        local_kill_score = _native_local_kill_highlight(working)
+        local_kill_rows = (
+            _native_local_kill_row_fingerprints(image)
+            if local_kill_score >= .12 else ()
+        )
+        local_kill_highlight = local_kill_score >= .45 or bool(local_kill_rows)
+        if local_kill_rows:
+            local_kill_score = max(local_kill_score, .55)
+        # These are deliberately candidates, not claims of a confirmed shot
+        # or hit.  They only upgrade an encounter when an opposing character
+        # is detected in the same short time window.
+        shot_candidate = not flashed and shot_score >= 0.04
+        damage_candidate = not flashed and damage_score >= 0.025
+
         return FirstPersonSample(
             frame_index=frame_index,
             timestamp_sec=timestamp_sec,
@@ -91,7 +124,301 @@ class FirstPersonAnalyzer:
             scoped=scoped,
             motion_score=motion,
             player_team=self._player_team,
+            shot_candidate=shot_candidate,
+            damage_candidate=damage_candidate,
+            shot_signal_score=round(shot_score, 5),
+            damage_signal_score=round(damage_score, 5),
+            health_hud_visible=health_hud_visible,
+            health_hud_score=round(health_hud_score, 5),
+            local_kill_highlight=local_kill_highlight,
+            local_kill_highlight_score=round(local_kill_score, 5),
+            local_kill_row_fingerprints=local_kill_rows,
         )
+
+    def _combat_signal_scores(
+        self, hsv: NDArray[np.uint8],
+    ) -> tuple[float, float]:
+        """Return conservative muzzle-flash and damage-overlay change scores."""
+        h, w = hsv.shape[:2]
+        muzzle = hsv[int(h * .30):int(h * .78), int(w * .30):int(w * .86)]
+        warm = (
+            (muzzle[:, :, 0] <= 34)
+            & (muzzle[:, :, 1] >= 110)
+            & (muzzle[:, :, 2] >= 215)
+        )
+        shot_score = 0.0
+        if (
+            self._previous_muzzle_mask is not None
+            and self._previous_muzzle_mask.shape == warm.shape
+        ):
+            shot_score = float(np.mean(warm & ~self._previous_muzzle_mask))
+        self._previous_muzzle_mask = warm
+
+        red = (
+            ((hsv[:, :, 0] <= 8) | (hsv[:, :, 0] >= 172))
+            & (hsv[:, :, 1] >= 120)
+            & (hsv[:, :, 2] >= 100)
+        )
+        left = float(np.mean(
+            red[int(h * .12):int(h * .82), int(w * .03):int(w * .20)]
+        ))
+        right = float(np.mean(
+            red[int(h * .12):int(h * .82), int(w * .80):int(w * .97)]
+        ))
+        damage_score = 0.0
+        if self._red_edge_baseline is not None:
+            damage_score = min(
+                max(0.0, left - self._red_edge_baseline[0]),
+                max(0.0, right - self._red_edge_baseline[1]),
+            )
+        if self._red_edge_baseline is None:
+            self._red_edge_baseline = (left, right)
+        else:
+            self._red_edge_baseline = (
+                self._red_edge_baseline[0] * .85 + left * .15,
+                self._red_edge_baseline[1] * .85 + right * .15,
+            )
+        # Require visible red on both sides; a single red wall or weapon skin
+        # must not be interpreted as player damage.
+        if min(left, right) < .035:
+            damage_score = 0.0
+        return shot_score, damage_score
+
+
+def _native_local_kill_highlight(image: NDArray[np.uint8]) -> float:
+    """Measure CS2's red local-kill frame without reading kill-feed text.
+
+    Native CS2 draws a thin red/magenta rectangle around a feed row when the
+    POV player is the killer.  Other players' rows retain only the dark feed
+    background.  We require both a long horizontal chroma segment and an
+    adjacent dark row interior so warm map surfaces do not become kills.
+    """
+    h, w = image.shape[:2]
+    roi = image[
+        int(h * .003):int(h * .253),
+        int(w * .785):int(w * .997),
+    ]
+    if roi.size == 0 or roi.shape[0] < 12 or roi.shape[1] < 24:
+        return 0.0
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = cv2.split(hsv)
+    red = (
+        ((hue <= 12) | (hue >= 150))
+        & (saturation >= 140)
+        & (value >= 70)
+    ).astype(np.uint8) * 255
+    horizontal = cv2.morphologyEx(
+        red,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT, (max(17, roi.shape[1] // 8), 1),
+        ),
+    )
+    _, _, stats, _ = cv2.connectedComponentsWithStats(horizontal)
+    best = 0.0
+    vertical_limit = roi.shape[0] * .08
+    minimum_width = roi.shape[1] * .20
+    pad = max(2, roi.shape[0] // 60)
+    depth = max(12, roi.shape[0] // 6)
+    for x, y, component_w, component_h, area in stats[1:]:
+        if component_w < minimum_width or component_h > vertical_limit:
+            continue
+        # A true HUD outline is a nearly continuous thin line.  Warm walls,
+        # wood grain, and damage tint produce thicker, broken colour blobs.
+        fill_ratio = area / max(1, component_w * component_h)
+        if fill_ratio < .70:
+            continue
+        component_pixels = horizontal[
+            y:y + component_h, x:x + component_w
+        ] > 0
+        component_value = value[
+            y:y + component_h, x:x + component_w
+        ][component_pixels]
+        if component_value.size == 0 or float(np.median(component_value)) < 95:
+            continue
+        adjacent_row_scores: list[tuple[float, float]] = []
+        for y1, y2 in (
+            (y + pad, min(y + depth, roi.shape[0])),
+            (max(0, y - depth), max(0, y - pad)),
+        ):
+            if y2 > y1:
+                row_saturation = saturation[y1:y2, x:x + component_w]
+                row_value = value[y1:y2, x:x + component_w]
+                adjacent_row_scores.append((
+                    float(np.mean(row_value < 110)),
+                    float(np.mean(
+                        (row_value >= 170) & (row_saturation <= 105)
+                    )),
+                ))
+        qualified_rows = [
+            dark for dark, white in adjacent_row_scores
+            if dark >= .20 and white >= .01
+        ]
+        if not qualified_rows:
+            continue
+        dark_ratio = max(qualified_rows)
+        width_ratio = component_w / roi.shape[1]
+        best = max(best, width_ratio * min(1.0, dark_ratio / .50))
+    return min(1.0, best)
+
+
+def _native_local_kill_row_fingerprints(
+    image: NDArray[np.uint8],
+) -> tuple[bytes, ...]:
+    """Return compact visual crops for native local-kill rows.
+
+    The crop is deliberately content-agnostic.  It is never OCRed and does
+    not decide who made the kill; the native red frame already made that
+    decision.  Keeping the glyph layout lets the aggregator recognise the
+    same feed row after it moves upward or briefly fades out.
+    """
+    h, w = image.shape[:2]
+    y0, y1 = int(h * .003), int(h * .253)
+    x0, x1 = int(w * .70), int(w * .997)
+    roi = image[y0:y1, x0:x1]
+    if roi.size == 0 or roi.shape[0] < 20 or roi.shape[1] < 60:
+        return ()
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hue, saturation, value = cv2.split(hsv)
+    red = (
+        ((hue <= 12) | (hue >= 150))
+        & (saturation >= 120)
+        & (value >= 60)
+    ).astype(np.uint8) * 255
+    scale = max(1, round(roi.shape[1] / 570))
+    candidates: list[tuple[int, int, int, int]] = []
+    minimum_width = roi.shape[1] * .22
+    minimum_height = max(8, roi.shape[0] * .055)
+    maximum_height = roi.shape[0] * .24
+
+    def add_candidate(candidate: tuple[int, int, int, int]) -> None:
+        x, y, component_w, component_h = candidate
+        if (
+            component_w < minimum_width
+            or not minimum_height <= component_h <= maximum_height
+            # Native kill-feed rows are right-aligned against the screen
+            # edge.  Requiring that geometry prevents red map details or a
+            # plain teammate row below the local highlight from becoming a
+            # second fingerprint.
+            or x + component_w < roi.shape[1] * .90
+        ):
+            return
+        inset = max(2, component_h // 10)
+        interior = roi[
+            y + inset:y + component_h - inset,
+            x + inset:x + component_w - inset,
+        ]
+        if interior.size == 0:
+            return
+        interior_hsv = cv2.cvtColor(interior, cv2.COLOR_BGR2HSV)
+        interior_saturation = interior_hsv[:, :, 1]
+        interior_value = interior_hsv[:, :, 2]
+        dark_ratio = float(np.mean(interior_value < 115))
+        glyph_ratio = float(np.mean(
+            (interior_value >= 155) & (interior_saturation <= 150)
+        ))
+        if dark_ratio >= .18 and glyph_ratio >= .008:
+            candidates.append(candidate)
+
+    # Adjacent local kills share a border and therefore become one large
+    # external contour.  Pair horizontal outline segments first so two stacked
+    # rows remain two distinct observations.
+    horizontal = cv2.morphologyEx(
+        red,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT, (max(17, round(roi.shape[1] * .075)), 1),
+        ),
+    )
+    _, _, line_stats, _ = cv2.connectedComponentsWithStats(horizontal)
+    raw_lines: list[tuple[int, int, int]] = []
+    for x, y, line_w, line_h, area in line_stats[1:]:
+        if (
+            line_w >= minimum_width
+            and line_h <= max(4, roi.shape[0] * .055)
+            and area / max(1, line_w * line_h) >= .52
+        ):
+            raw_lines.append((x, y + line_h // 2, line_w))
+    raw_lines.sort(key=lambda item: item[1])
+    line_groups: list[list[tuple[int, int, int]]] = []
+    for line in raw_lines:
+        if (
+            not line_groups
+            or line[1] - line_groups[-1][-1][1] > max(4, roi.shape[0] * .025)
+        ):
+            line_groups.append([line])
+        else:
+            line_groups[-1].append(line)
+    lines = [
+        (
+            min(item[0] for item in group),
+            round(float(np.median([item[1] for item in group]))),
+            max(item[0] + item[2] for item in group),
+        )
+        for group in line_groups
+    ]
+    for upper, lower in zip(lines, lines[1:]):
+        gap = lower[1] - upper[1]
+        overlap = min(upper[2], lower[2]) - max(upper[0], lower[0])
+        if (
+            minimum_height <= gap <= maximum_height
+            and overlap >= minimum_width * .55
+        ):
+            x = min(upper[0], lower[0])
+            right = max(upper[2], lower[2])
+            add_candidate((x, upper[1], right - x, gap))
+
+    # A single fading row may not retain both horizontal edges.  The closed
+    # outline contour is the fallback for that case.
+    closed = cv2.morphologyEx(
+        red,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9 * scale, 5 * scale)),
+    )
+    contours, _ = cv2.findContours(
+        closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+    )
+    for contour in contours:
+        x, y, component_w, component_h = cv2.boundingRect(contour)
+        add_candidate((x, y, component_w, component_h))
+
+    # Contours from a fading outline can overlap.  Keep the wider rectangle
+    # when two candidates describe the same vertical feed row.
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    selected: list[tuple[int, int, int, int]] = []
+    for candidate in candidates:
+        _, y, _, component_h = candidate
+        centre = y + component_h / 2
+        if any(
+            abs(centre - (other_y + other_h / 2))
+            < max(component_h, other_h) * .55
+            for _, other_y, _, other_h in selected
+        ):
+            continue
+        selected.append(candidate)
+
+    encoded: list[bytes] = []
+    for x, y, component_w, component_h in sorted(
+        selected, key=lambda item: item[1],
+    ):
+        inset = max(2, component_h // 10)
+        row = roi[
+            y + inset:y + component_h - inset,
+            x + round(component_w * .65):x + component_w - inset,
+        ]
+        if row.size == 0:
+            continue
+        normalised = cv2.resize(
+            row, (200, 40), interpolation=cv2.INTER_AREA,
+        )
+        ok, buffer = cv2.imencode(
+            ".jpg", normalised, [cv2.IMWRITE_JPEG_QUALITY, 82],
+        )
+        if ok:
+            encoded.append(buffer.tobytes())
+    return tuple(encoded)
 
 
 def _detect_player_team(image: NDArray[np.uint8]) -> str | None:
@@ -113,6 +440,28 @@ def _detect_player_team(image: NDArray[np.uint8]) -> str | None:
     if counter_terrorist >= minimum and counter_terrorist > terrorist * 1.8:
         return "ct"
     return None
+
+
+def _native_health_hud(image: NDArray[np.uint8]) -> tuple[float, bool]:
+    """Measure the native bottom HUD health/armour cluster.
+
+    This intentionally does not try to turn coloured-pixel area into an HP
+    number.  A stable CS2 HUD cluster is sufficient for conservative death
+    transition detection, while arbitrary recording watermarks are outside
+    this narrow native-HUD region.
+    """
+    h, w = image.shape[:2]
+    roi = image[int(h * .90):int(h * .995), int(w * .245):int(w * .335)]
+    if roi.size == 0:
+        return 0.0, False
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    coloured_text = float(np.mean(
+        (hsv[:, :, 2] > 145) & (hsv[:, :, 1] > 55)
+    ))
+    edge_ratio = float(np.mean(cv2.Canny(gray, 80, 160) > 0))
+    score = coloured_text + edge_ratio * .35
+    return score, coloured_text >= .025 and edge_ratio >= .02
 
 
 def build_first_person_summary_events(

@@ -1,5 +1,7 @@
 """Tests for i18n loader."""
 
+import json
+from pathlib import Path
 from unittest import TestCase
 
 from gamesight.i18n.loader import I18nLoader
@@ -48,3 +50,23 @@ class I18nLoaderBasicTests(TestCase):
     def test_invalid_locale_raises(self) -> None:
         with self.assertRaises(ValueError):
             I18nLoader("fr")
+
+    def test_english_and_chinese_have_the_same_translation_keys(self) -> None:
+        locale_dir = (
+            Path(__file__).parents[1]
+            / "src" / "gamesight" / "i18n" / "locales"
+        )
+        en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
+        zh = json.loads((locale_dir / "zh-CN.json").read_text(encoding="utf-8"))
+
+        def flatten(value, prefix=""):
+            keys = set()
+            for key, child in value.items():
+                path = f"{prefix}.{key}" if prefix else key
+                if isinstance(child, dict):
+                    keys.update(flatten(child, path))
+                else:
+                    keys.add(path)
+            return keys
+
+        self.assertEqual(flatten(en), flatten(zh))

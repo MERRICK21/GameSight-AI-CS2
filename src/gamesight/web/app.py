@@ -18,6 +18,7 @@ from gamesight.events.aggregator import aggregate_events
 from gamesight.events.detectors import KillEventDetector, RoundBoundaryDetector
 from gamesight.events.ocr_detector import OCRRoundDetector
 from gamesight.evidence.extractor import (
+    EvidenceClipExtractor,
     OpenCVScreenshotExtractor,
     build_round_keyframe_events,
 )
@@ -33,8 +34,11 @@ from gamesight.perception.hud_profiles import CS2_STANDARD_16X9
 from gamesight.perception.first_person import (
     FirstPersonAnalyzer, build_first_person_summary_events,
 )
+from gamesight.perception.native_status import detect_native_deaths
+from gamesight.perception.native_kill import detect_native_kills
 from gamesight.perception.cs2_detector import (
     CS2FactionDetector, PlayerDetectionSample, build_engagement_events,
+    inference_stride,
 )
 from gamesight.reporting.builder import EvidenceReportBuilder
 from gamesight.web.demo import generate_demo_events, generate_demo_tracks
@@ -46,16 +50,80 @@ if "analysis_run" not in st.session_state:
         "analysis_run": False, "result": None, "analysis_obj": None,
         "tracks": None, "progress": 0, "status": "",
         "coach_suggestions": None, "coach_summary": None,
-        "screenshots": None, "live_result": None, "locale": "en", "mode": "video", "debug_screenshots": [],
+        "screenshots": None, "clips": None, "live_result": None,
+        "live_state": None, "locale": "en", "mode": "video",
+        "content_locale": None, "debug_screenshots": [],
         "player_filter": False, "player_name": "", "use_yolo": False,
     })
 
 MAX_TIME_REAL = 1800   # 30 min max for long real-video analysis
 MAX_TIME_DEMO = 60     # 1 min max for demo
 HUD_SAMPLE_FPS = 2.0   # Round/HUD state does not need high-rate analysis.
+YOLO_SAMPLE_FPS = 2.0  # Enemy contacts do not justify >2 neural passes/sec.
 SCORE_OCR_INTERVAL_SEC = 2.0  # Score persists throughout freeze time.
 def _loader(): return I18nLoader(st.session_state.get("locale", "en"))
 def _t(key: str, **kwargs) -> str: return _loader().t(key, **kwargs)
+
+
+class _CachedHudParser:
+    """Return a previously parsed HUD state when only language changes."""
+
+    def __init__(self, state) -> None:
+        self._state = state
+
+    def parse(self, _image, _frame_index, _timestamp_sec):
+        return self._state
+
+
+def _refresh_localized_outputs() -> None:
+    """Rebuild cached report/coach strings in the selected locale."""
+    analysis = st.session_state.get("analysis_obj")
+    if analysis is not None:
+        caps = analysis.capabilities
+        complete = caps.get("analysis_complete", True)
+        personal = caps.get("personal_combat", True)
+        kills = caps.get("personal_kills", personal)
+        deaths = caps.get("personal_deaths", personal)
+        if analysis.video.video_id == "demo_cs2_match":
+            warning = None
+        elif not complete:
+            processed = max(
+                [round_.end_sec or round_.start_sec for round_ in analysis.rounds]
+                or [0.0]
+            )
+            warning = _t("run.analysis_timed_out", seconds=processed)
+        elif personal:
+            warning = _t("run.personal_combat_native")
+        elif kills:
+            warning = _t("run.personal_kills_native")
+        elif deaths:
+            warning = _t("run.personal_kills_unavailable")
+        else:
+            warning = _t("run.personal_combat_unavailable")
+        analysis.warnings = [warning] if warning else []
+        report = EvidenceReportBuilder(loader=_loader()).build(
+            analysis, st.session_state.get("tracks"),
+        )
+        st.session_state["result"] = report.model_dump(mode="json")
+        if complete:
+            coach = RuleBasedCoach(_loader())
+            suggestions = coach.generate(analysis, report)
+            st.session_state["coach_suggestions"] = suggestions
+            st.session_state["coach_summary"] = coach.summarize(
+                suggestions, analysis, report,
+            )
+        st.session_state["status"] = _t("run.complete")
+
+    for debug_result in st.session_state.get("debug_results", []):
+        debug_result["advice"] = LiveAnalyzer(
+            _CachedHudParser(debug_result["state"]), _loader(),
+        ).analyze(debug_result["frame"])
+    live_state = st.session_state.get("live_state")
+    if live_state is not None:
+        st.session_state["live_result"] = LiveAnalyzer(
+            _CachedHudParser(live_state), _loader(),
+        ).analyze(np.zeros((1, 1, 3), dtype=np.uint8))
+    st.session_state["content_locale"] = st.session_state.get("locale", "en")
 
 
 def _filter_post_death(analysis: AnalysisResult) -> tuple[AnalysisResult, int]:
@@ -98,7 +166,7 @@ def _real_pipeline(
     ocr_detector = OCRRoundDetector(profile=CS2_STANDARD_16X9)
     use_score_ocr = ocr_detector.available
     if not use_score_ocr:
-        st.warning("EasyOCR not installed. Run: pip install easyocr. Falling back to timer-gap round detection.")
+        st.warning(_t("run.ocr_fallback"))
 
     hud_states = []
     score_events = []
@@ -112,15 +180,23 @@ def _real_pipeline(
             faction_detector = CS2FactionDetector(model_path=model_path)
         except (FileNotFoundError, ImportError, RuntimeError) as exc:
             st.warning(f"{_t('run.cs2_model_unavailable')} ({exc})")
-    # Run on every sampled frame.  At the recommended 2 FPS this retains
-    # half-second contacts that a one-pass-per-second schedule can miss.
-    yolo_every = 1
+    # The visual-effects FPS can be 10, but running YOLO at that same rate is
+    # prohibitively expensive and caused long recordings to time out with
+    # misleading partial match totals.  Cap neural inference at 2 FPS.
+    yolo_every = inference_stride(sample_fps, YOLO_SAMPLE_FPS)
     next_hud_timestamp = 0.0
     last_score_ocr_timestamp: float | None = None
+    timed_out = False
+    processed_until_sec = 0.0
     for i, frame in enumerate(reader.frames(video, sample_fps)):
         if time.time() - t0 > MAX_TIME_REAL:
-            st.warning(f"Analysis timed out after {MAX_TIME_REAL}s. Processing partial results.")
+            timed_out = True
+            st.warning(_t(
+                "run.analysis_timed_out",
+                seconds=processed_until_sec,
+            ))
             break
+        processed_until_sec = frame.timestamp_sec
         first_person_sample = first_person_analyzer.update(
             frame.image, frame.frame_index, frame.timestamp_sec,
         )
@@ -166,7 +242,10 @@ def _real_pipeline(
                 eta = 0
             pct = min(10 + int(60 * i / max(total_est, 1)), 70)
             st.session_state["progress"] = pct
-            st.session_state["status"] = f"{_t('run.processing_frame', n=i)} | ETA {eta:.0f}s"
+            st.session_state["status"] = (
+                f"{_t('run.processing_frame', n=i)} | "
+                f"{_t('run.eta', seconds=eta)}"
+            )
 
     n_states = len(hud_states)
     st.session_state["status"] = _t("run.detecting_events", n=n_states)
@@ -190,18 +269,50 @@ def _real_pipeline(
     events.extend(ked.finalize())
 
     rounds = aggregate_events(events)
-    engagement_events = build_engagement_events(rounds, player_detection_samples)
+    engagement_events = build_engagement_events(
+        rounds, player_detection_samples, first_person_samples,
+    )
     events.extend(engagement_events)
+    native_deaths = detect_native_deaths(rounds, first_person_samples)
+    events.extend(native_deaths.events)
+    native_kills = detect_native_kills(
+        rounds, first_person_samples, engagement_events,
+    )
+    events.extend(native_kills.events)
     events.extend(build_first_person_summary_events(rounds, first_person_samples))
     rounds = aggregate_events(events)
     st.session_state["progress"] = 85
+    native_combat_available = (
+        native_kills.available and native_deaths.available
+    )
+    analysis_warnings = [_t(
+        "run.personal_combat_native"
+        if native_combat_available
+        else (
+            "run.personal_kills_native"
+            if native_kills.available
+            else (
+                "run.personal_kills_unavailable"
+                if native_deaths.available
+                else "run.personal_combat_unavailable"
+            )
+        )
+    )]
+    if timed_out:
+        analysis_warnings = [_t(
+            "run.analysis_timed_out",
+            seconds=processed_until_sec,
+        )]
     analysis = AnalysisResult(
         video=video,
         metadata=metadata,
         rounds=rounds,
-        warnings=[_t("run.personal_combat_unavailable")],
+        warnings=analysis_warnings,
         capabilities={
-            "personal_combat": False,
+            "analysis_complete": not timed_out,
+            "personal_combat": native_combat_available and not timed_out,
+            "personal_kills": native_kills.available and not timed_out,
+            "personal_deaths": native_deaths.available and not timed_out,
             "enemy_contact": faction_detector is not None,
         },
     )
@@ -211,11 +322,23 @@ def _real_pipeline(
     st.session_state["analysis_obj"] = analysis
     coach = RuleBasedCoach(_loader()); builder = EvidenceReportBuilder(loader=_loader())
     cr = builder.build(analysis)
-    st.session_state["coach_suggestions"] = coach.generate(analysis, cr)
-    st.session_state["coach_summary"] = coach.summarize(st.session_state["coach_suggestions"], analysis, cr)
+    if timed_out:
+        # Partial rounds must never feed match-level coaching conclusions.
+        st.session_state["coach_suggestions"] = []
+        st.session_state["coach_summary"] = None
+    else:
+        st.session_state["coach_suggestions"] = coach.generate(analysis, cr)
+        st.session_state["coach_summary"] = coach.summarize(
+            st.session_state["coach_suggestions"], analysis, cr,
+        )
     st.session_state["progress"] = 100
     elapsed_total = time.time() - t0
-    st.session_state["status"] = f"{_t('run.complete')} ({elapsed_total:.0f}s)"
+    st.session_state["status"] = (
+        f"{_t('run.partial_complete', seconds=processed_until_sec)} "
+        f"({elapsed_total:.0f}s)"
+        if timed_out else f"{_t('run.complete')} ({elapsed_total:.0f}s)"
+    )
+    st.session_state["content_locale"] = st.session_state.get("locale", "en")
     return cr.model_dump(mode="json")
 
 
@@ -235,6 +358,7 @@ def _demo_pipeline() -> dict:
     cr = builder.build(analysis, tracks)
     st.session_state["coach_suggestions"] = coach.generate(analysis, cr)
     st.session_state["coach_summary"] = coach.summarize(st.session_state["coach_suggestions"], analysis, cr)
+    st.session_state["content_locale"] = st.session_state.get("locale", "en")
     st.session_state["progress"] = 100; st.session_state["status"] = _t("run.complete")
     return cr.model_dump(mode="json")
 
@@ -246,13 +370,6 @@ REGION_COLORS = {
     "money": (255, 0, 255), "player_status": (0, 165, 255),
     "weapon_utility": (128, 0, 255),
 }
-REGION_NAMES = {
-    "minimap": "Minimap", "round_info": "Round/Timer",
-    "kill_feed": "Kill Feed", "crosshair": "Crosshair",
-    "money": "Money", "player_status": "HP/Armour",
-    "weapon_utility": "Weapon/Utility",
-}
-
 def _draw_hud_debug(pil_img, profile) -> Image.Image:
     """Draw bounding boxes and labels for all HUD regions on the image."""
     import PIL.ImageDraw, PIL.ImageFont
@@ -266,7 +383,8 @@ def _draw_hud_debug(pil_img, profile) -> Image.Image:
 
     for region in profile.regions:
         color = REGION_COLORS.get(region.name, (255, 255, 255))
-        name = REGION_NAMES.get(region.name, region.name)
+        translated_name = _t(f"hud_regions.{region.name}")
+        name = translated_name if not translated_name.startswith("hud_regions.") else region.name
         x, y, rw, rh = region.to_pixel(w, h)
         # Clamp
         x = max(0, min(x, w - 1)); y = max(0, min(y, h - 1))
@@ -289,11 +407,17 @@ with st.sidebar:
     lang_labels = {"en": "English", "zh-CN": "简体中文"}
     lang = st.selectbox(_t("sidebar.language"), options=["en", "zh-CN"],
                         format_func=lambda x: lang_labels[x], index=0 if st.session_state["locale"] == "en" else 1)
-    if lang != st.session_state["locale"]: st.session_state["locale"] = lang; st.rerun()
+    if lang != st.session_state["locale"]:
+        st.session_state["locale"] = lang
+        _refresh_localized_outputs()
+        st.rerun()
     st.divider()
-    mode = st.radio("📋 Mode", ["📁 Video Analysis", "📸 Screenshot Debug"],
-                    index=0 if st.session_state.get("mode", "video") == "video" else 1)
-    new_mode = "video" if "Video" in mode else "screenshot"
+    new_mode = st.radio(
+        f"📋 {_t('sidebar.mode')}",
+        ["video", "screenshot"],
+        format_func=lambda value: _t(f"sidebar.mode_{value}"),
+        index=0 if st.session_state.get("mode", "video") == "video" else 1,
+    )
     if new_mode != st.session_state.get("mode"): st.session_state["mode"] = new_mode; st.rerun()
     st.divider()
     if st.session_state.get("mode") == "video":
@@ -318,32 +442,35 @@ with st.sidebar:
         st.caption(_t("sidebar.sampling_strategy", fps=sample_fps))
     else:
         use_demo = False; uploaded = None; use_yolo = False; pf = False; sample_fps = 10
-        st.subheader("📸 Upload Screenshots")
-        debug_files = st.file_uploader("Select CS2 screenshots", type=["jpg", "jpeg", "png"],
+        st.subheader(f"📸 {_t('sidebar.debug_upload_title')}")
+        debug_files = st.file_uploader(_t("sidebar.debug_upload_label"), type=["jpg", "jpeg", "png"],
                                        accept_multiple_files=True, key="debug_upload")
         if debug_files:
             st.session_state["debug_screenshots"] = debug_files
-            st.caption(f"{len(debug_files)} screenshot(s) loaded")
-    st.divider(); st.caption(f"{_t('app.version')} | 411 tests")
+            st.caption(_t("sidebar.debug_loaded", n=len(debug_files)))
+    st.divider(); st.caption(
+        f"{_t('app.version')} | {_t('app.test_count', n=464)}"
+    )
 
 if st.session_state.get("mode") == "screenshot":
     # ---- Screenshot Debug Mode ----
     debug_files = st.session_state.get("debug_screenshots", [])
     if debug_files:
-        if st.button("🔍 Analyze Screenshots", type="primary"):
+        if st.button(f"🔍 {_t('debug.analyze')}", type="primary"):
             with st.spinner(_t("loading")):
                 st.session_state["debug_results"] = []
                 parser = CS2HudParser(CS2_STANDARD_16X9, {
-                    "crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
+                    "crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(enable_numeric_ocr=True),
                     "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(),
                     "round_info": RoundInfoExtractor(),
                 })
-                analyzer = LiveAnalyzer(parser, _loader())
                 for f in debug_files:
                     pil = Image.open(f).convert("RGB")
                     frame = np.array(pil)[:, :, ::-1].copy()
                     state = parser.parse(frame, 0, 0.0)
-                    advice = analyzer.analyze(frame)
+                    advice = LiveAnalyzer(
+                        _CachedHudParser(state), _loader(),
+                    ).analyze(frame)
                     st.session_state["debug_results"].append({
                         "name": f.name, "image": pil, "state": state,
                         "advice": advice, "frame": frame,
@@ -356,22 +483,22 @@ if st.session_state.get("mode") == "screenshot":
             c1, c2 = st.columns([1, 1])
             with c1:
                 debug_img = _draw_hud_debug(dr["image"], CS2_STANDARD_16X9)
-                st.image(debug_img, caption="HUD Regions", use_container_width=True)
+                st.image(debug_img, caption=_t("debug.hud_regions"), use_container_width=True)
             with c2:
-                st.subheader("HUD Values")
+                st.subheader(_t("debug.hud_values"))
                 vals = dr["state"].values
                 st.json({k: v for k, v in sorted(vals.items()) if isinstance(v, (str, int, float, bool, type(None)))})
                 st.divider()
-                st.subheader("🎯 Advice")
+                st.subheader(f"🎯 {_t('debug.advice')}")
                 a = dr["advice"]
-                st.metric("Status", a.status)
-                st.markdown(f"**Action:** {a.next_action}")
-                st.caption(f"Confidence: {a.confidence:.2f}")
+                st.metric(_t("debug.status"), a.status)
+                st.markdown(f"**{_t('debug.action')}:** {a.next_action}")
+                st.caption(f"{_t('debug.confidence')}: {a.confidence:.2f}")
                 for tip in a.tips:
                     st.markdown(f"- {tip}")
             st.divider()
     elif not debug_files:
-        st.info("Switch to Screenshot Debug mode in the sidebar, upload screenshots, then click Analyze.")
+        st.info(_t("debug.empty_hint"))
     st.stop()
 
 # ---- Video Analysis Mode ----
@@ -387,6 +514,7 @@ if run_clicked:
     st.session_state["analysis_run"] = True; st.session_state["progress"] = 0
     st.session_state["result"] = None; st.session_state["coach_suggestions"] = None
     st.session_state["coach_summary"] = None; st.session_state["screenshots"] = None
+    st.session_state["clips"] = None
     with st.spinner(_t("loading")):
         if use_demo: result = _demo_pipeline()
         else:
@@ -414,6 +542,7 @@ if run_clicked:
                             EventType.FIRST_PERSON_SUMMARY,
                             EventType.FIRST_PERSON_MOMENT,
                             EventType.ENGAGEMENT_CANDIDATE,
+                            EventType.PLAYER_DEATH,
                         )
                     ]
                     # Evidence-triggered moments get capacity first.  This
@@ -431,11 +560,40 @@ if run_clicked:
                     ]
                     important.extend(combat_events[:max(0, 40 - len(important))])
                     st.session_state["screenshots"] = extractor.extract(video_path, important)
+                    clip_events = [
+                        event for round_analysis in analysis.rounds
+                        for event in round_analysis.events
+                        if event.event_type == EventType.PLAYER_DEATH
+                    ]
+                    clip_events.extend(
+                        event for round_analysis in analysis.rounds
+                        for event in round_analysis.events
+                        if event.event_type == EventType.ENGAGEMENT_CANDIDATE
+                    )
+                    clip_events.extend(
+                        event for round_analysis in analysis.rounds
+                        for event in round_analysis.events
+                        if event.event_type == EventType.FIRST_PERSON_MOMENT
+                    )
+                    try:
+                        st.session_state["clips"] = EvidenceClipExtractor(
+                            before_sec=2.0, after_sec=3.0, max_clips=12,
+                        ).extract(video_path, clip_events)
+                    except (ImportError, RuntimeError, OSError) as exc:
+                        st.warning(f"{_t('run.clip_unavailable')} ({exc})")
             finally: Path(video_path).unlink(missing_ok=True)
         st.session_state["result"] = result; st.rerun()
 
+if (
+    st.session_state.get("analysis_obj") is not None
+    and st.session_state.get("content_locale")
+    != st.session_state.get("locale", "en")
+):
+    _refresh_localized_outputs()
+
 result = st.session_state.get("result"); coach_suggestions = st.session_state.get("coach_suggestions")
 coach_summary = st.session_state.get("coach_summary"); screenshots = st.session_state.get("screenshots")
+clips = st.session_state.get("clips")
 
 if result is None:
     if not st.session_state.get("analysis_run"):
@@ -457,9 +615,25 @@ with t1:
     st.subheader(_t("overview.match_overview"))
     cols = st.columns(5)
     combat_available = ov.get("personal_combat_available", True)
-    cols[0].metric(_t("overview.video"), ov["video_id"]); cols[1].metric(_t("overview.rounds"), ov["total_rounds"])
-    cols[2].metric(_t("overview.duration"), f"{ov.get('duration_sec',0):.0f}s" if ov.get("duration_sec") else "N/A")
-    cols[3].metric(_t("overview.kills"), ov["total_kills_detected"] if combat_available else "—"); cols[4].metric(_t("overview.deaths"), ov["total_deaths_detected"] if combat_available else "—")
+    kills_available = ov.get("personal_kills_available", combat_available)
+    deaths_available = ov.get("personal_deaths_available", combat_available)
+    analysis_complete = ov.get("analysis_complete", True)
+    kills_label = _t(
+        "overview.kills_lower_bound"
+        if kills_available and not combat_available else "overview.kills"
+    )
+    cols[0].metric(_t("overview.video"), ov["video_id"]); cols[1].metric(
+        _t("overview.rounds"),
+        ov["total_rounds"] if analysis_complete else f"{ov['total_rounds']}*",
+    )
+    cols[2].metric(
+        _t("overview.duration"),
+        f"{ov.get('duration_sec',0):.0f}s"
+        if ov.get("duration_sec") else _t("common.unavailable"),
+    )
+    cols[3].metric(kills_label, ov["total_kills_detected"] if kills_available else "—"); cols[4].metric(_t("overview.deaths"), ov["total_deaths_detected"] if deaths_available else "—")
+    if not analysis_complete:
+        st.error(_t("overview.partial_result"))
     st.divider(); st.subheader(_t("overview.round_summary"))
     rows = []
     for r in result.get("rounds", []):
@@ -471,13 +645,18 @@ with t1:
             _t("overview.scoped"): f"{s.get('scoped_sec', 0):.1f}s",
             _t("overview.view_motion"): f"{s.get('view_motion_avg', 0):.2f}",
             _t("overview.stationary"): f"{s.get('stationary_ratio', 0) * 100:.0f}%",
-            _t("overview.engagements"): s.get("engagement_windows", 0),
+            _t("overview.engagements"): (
+                f"{s.get('engagement_windows', 0)} / "
+                f"{s.get('likely_firefights', 0)}"
+            ),
         }
-        if combat_available:
+        if kills_available:
+            row[kills_label] = s["kills_detected"]
+        if deaths_available:
             row.update({
-                _t("overview.kills"): s["kills_detected"],
-                _t("overview.player_died"): "Yes" if s.get("player_died") else "No",
-                _t("overview.killfeed"): s["killfeed_events"],
+                _t("overview.player_died"): _t(
+                    "common.yes" if s.get("player_died") else "common.no"
+                ),
             })
         rows.append(row)
     st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -490,30 +669,55 @@ with t2:
         with st.expander(label, expanded=len(result["rounds"]) <= 2):
             for f in r.get("findings", []):
                 sev = f["severity"]; color = {"info":"#4fc3f7","warning":"#ffb74d","critical":"#ef5350"}.get(sev, "#888")
+                severity = _t(f"severity.{sev}")
                 st.markdown(f"""<div style="border-left:4px solid {color};padding:.5rem 1rem;margin:.4rem 0;border-radius:0 6px 6px 0;background:#161b22">
-                    <strong>[{sev.upper()}]</strong> {f['text']}<br><small style="color:#8b949e">{_t('timeline.confidence')}: {f['confidence']:.2f} | {f['finding_id']}</small></div>""", unsafe_allow_html=True)
+                    <strong>[{severity}]</strong> {f['text']}<br><small style="color:#8b949e">{_t('timeline.confidence')}: {f['confidence']:.2f} | {_t('common.id')}: {f['finding_id']}</small></div>""", unsafe_allow_html=True)
                 if screenshots:
                     for img in [s for s in screenshots if s.event_id == f.get("finding_id")][:1]:
-                        if img.exists(): st.image(str(img.image_path), caption=f"frame {img.frame_index} | t={img.timestamp_sec:.1f}s", width=400)
+                        if img.exists(): st.image(
+                            str(img.image_path),
+                            caption=_t(
+                                "common.frame_time",
+                                frame=img.frame_index,
+                                time=img.timestamp_sec,
+                            ),
+                            width=400,
+                        )
                 if f.get("evidence"):
                     with st.expander(_t("timeline.evidence_links"), expanded=False):
-                        for lk in f["evidence"]: st.caption(f"frame={lk.get('frame_index','?')} | t={lk['timestamp_sec']:.1f}s | {lk['source']}")
+                        for lk in f["evidence"]: st.caption(_t(
+                            "common.evidence_line",
+                            frame=lk.get("frame_index", "?"),
+                            time=lk["timestamp_sec"],
+                            source=lk["source"],
+                        ))
 
 # Report
 with t3:
     st.subheader(_t("report.title")); st.markdown(f"### {_t('report.match_summary')}")
     for f in result.get("match_findings", []):
         icon = {"info":"(i)","warning":"(!)","critical":"(!!)"}.get(f["severity"], "")
-        st.markdown(f"{icon} **[{f['severity'].upper()}]** {f['text']}")
+        severity = _t(f"severity.{f['severity']}")
+        st.markdown(f"{icon} **[{severity}]** {f['text']}")
     st.divider()
     for r in result.get("rounds", []):
         st.markdown(f"### {r['round_id']}")
         if r.get("duration_sec"): st.caption(f"{_t('report.duration_label')}: {r['duration_sec']:.1f}s")
         s = r["stats"]; c1,c2,c3,c4 = st.columns(4)
-        if combat_available:
-            c1.metric(_t("report.kills_label"), s["kills_detected"])
-            c2.metric(_t("report.deaths_label"), s["deaths_detected"])
-            surv = f"{s['survival_sec']:.0f}s" if s.get("survival_sec") else "N/A"
+        if kills_available or deaths_available:
+            c1.metric(
+                _t("report.kills_label"),
+                s["kills_detected"] if kills_available else "—",
+            )
+            c2.metric(
+                _t("report.deaths_label"),
+                s["deaths_detected"] if deaths_available else "—",
+            )
+            surv = (
+                f"{s['survival_sec']:.0f}s"
+                if deaths_available and s.get("survival_sec") is not None
+                else _t("common.unavailable")
+            )
             c3.metric(_t("report.survival_label"), surv)
             c4.metric(_t("report.enemies_label"), s.get("enemies_encountered", s.get("enemy_tracks", 0)))
         else:
@@ -533,38 +737,26 @@ with t4:
         for f in r.get("findings", []):
             for lk in f.get("evidence", []):
                 links.append({_t("evidence.round_col"): r["round_id"], _t("evidence.finding_col"): f["finding_id"],
-                              _t("evidence.category_col"): f["category"], _t("evidence.frame_col"): lk.get("frame_index","-"),
+                              _t("evidence.category_col"): _t(f"finding_categories.{f['category']}"), _t("evidence.frame_col"): lk.get("frame_index","-"),
                               _t("evidence.time_col"): f"{lk['timestamp_sec']:.1f}s", _t("evidence.source_col"): lk["source"]})
     if links: st.caption(_t("evidence.count", n=len(links))); st.dataframe(links, use_container_width=True, hide_index=True)
     else: st.info(_t("evidence.no_links"))
+    if clips:
+        st.divider(); st.subheader(_t("evidence.clips_title"))
+        st.caption(_t("evidence.clips_help"))
+        for clip in clips:
+            if clip.exists():
+                st.markdown(
+                    f"**{clip.event_id}** · {_t('common.time')}: "
+                    f"{clip.trigger_sec:.1f}s"
+                )
+                st.video(str(clip.video_path), format="video/mp4")
 
 # Coach
 with t5:
     st.subheader(f"\U0001f9e0 {_t('coach.title')}"); st.caption(_t("coach.subtitle"))
-    if not combat_available:
-        st.info(_t("coach.first_person_coverage"))
-    if not coach_suggestions: st.info(_t("coach.no_suggestions"))
-    else:
-        for s in coach_suggestions:
-            cat_name = _t(f"coach.categories.{s.category.value}")
-            with st.expander(f"**{cat_name}** | {_t('coach.round_label')} {s.round_id} | t={s.timestamp_sec:.1f}s", expanded=len(coach_suggestions)<=4):
-                st.markdown(f"**{_t('coach.reasoning')}:** {s.reasoning}")
-                st.markdown(f"**{_t('coach.action')}:** {s.action}")
-                st.caption(f"{_t('coach.confidence')}: {s.confidence:.2f} | id: {s.suggestion_id}")
-                if screenshots:
-                    for img in screenshots:
-                        # Prefer exact event_id match; fall back to timestamp proximity.
-                        if img.event_id and (img.event_id in s.suggestion_id or s.suggestion_id in img.event_id) and img.exists():
-                            st.image(str(img.image_path), caption=f"frame {img.frame_index} | t={img.timestamp_sec:.1f}s", width=400); break
-                    # Second pass: timestamp proximity fallback.
-                    for img in screenshots:
-                        if abs(img.timestamp_sec - s.timestamp_sec) < 2.0 and img.exists():
-                            st.image(str(img.image_path), caption=f"frame {img.frame_index} | t={img.timestamp_sec:.1f}s", width=400); break
-                if s.evidence:
-                    with st.expander(_t("coach.evidence"), expanded=False):
-                        for lk in s.evidence: st.caption(f"frame={lk.frame_index or '?'} | t={lk.timestamp_sec:.1f}s | {lk.source}")
     if coach_summary:
-        st.divider(); st.subheader(f"\U0001f3c6 {_t('summary_title')}")
+        st.subheader(f"\U0001f3c6 {_t('summary_title')}")
         st.markdown(f"**{_t('assessment')}:** {coach_summary.overall_assessment}")
         ca,cb = st.columns(2)
         with ca:
@@ -577,19 +769,91 @@ with t5:
             for item in coach_summary.weaknesses: st.markdown(f"- {item}")
             st.markdown(f"### {_t('practice_drills')}")
             for item in coach_summary.practice_drills: st.markdown(f"- {item}")
+        st.divider()
+    if not combat_available:
+        st.info(_t("coach.first_person_coverage"))
+    if not coach_suggestions: st.info(_t("coach.no_suggestions"))
+    else:
+        for s in coach_suggestions:
+            cat_name = _t(f"coach.categories.{s.category.value}")
+            with st.expander(
+                f"**{cat_name}** | {_t('coach.round_label')} {s.round_id} | "
+                f"{_t('common.time')}: {s.timestamp_sec:.1f}s",
+                expanded=len(coach_suggestions)<=4,
+            ):
+                st.markdown(f"**{_t('coach.reasoning')}:** {s.reasoning}")
+                st.markdown(f"**{_t('coach.action')}:** {s.action}")
+                st.caption(
+                    f"{_t('coach.confidence')}: {s.confidence:.2f} | "
+                    f"{_t('common.id')}: {s.suggestion_id}"
+                )
+                if screenshots:
+                    # Prefer an event-id match, otherwise show one nearby frame.
+                    # A single selection prevents the same image being rendered
+                    # once by each matching strategy.
+                    matching_image = next((
+                        img for img in screenshots
+                        if img.exists() and img.event_id and (
+                            img.event_id in s.suggestion_id
+                            or s.suggestion_id in img.event_id
+                        )
+                    ), None)
+                    if matching_image is None:
+                        matching_image = next((
+                            img for img in screenshots
+                            if img.exists()
+                            and abs(img.timestamp_sec - s.timestamp_sec) < 2.0
+                        ), None)
+                    if matching_image is not None:
+                        st.image(
+                            str(matching_image.image_path),
+                            caption=_t(
+                                "common.frame_time",
+                                frame=matching_image.frame_index,
+                                time=matching_image.timestamp_sec,
+                            ),
+                            width=400,
+                        )
+                if clips:
+                    matching_clip = next((
+                        clip for clip in clips
+                        if clip.exists() and (
+                            clip.event_id in s.suggestion_id
+                            or abs(clip.trigger_sec - s.timestamp_sec) < 2.1
+                        )
+                    ), None)
+                    if matching_clip is not None:
+                        st.caption(_t(
+                            "coach.clip_range",
+                            start=matching_clip.start_sec,
+                            end=matching_clip.end_sec,
+                        ))
+                        st.video(str(matching_clip.video_path), format="video/mp4")
+                if s.evidence:
+                    with st.expander(_t("coach.evidence"), expanded=False):
+                        for lk in s.evidence: st.caption(_t(
+                            "common.evidence_line",
+                            frame=lk.frame_index or "?",
+                            time=lk.timestamp_sec,
+                            source=lk.source,
+                        ))
 
 # Live
 with t6:
     st.subheader(f"\U0001f4f7 {_t('live.title')}"); st.caption(_t("live.subtitle"))
     live_img = st.file_uploader(_t("live.upload_label"), type=["jpg","jpeg","png"], key="live_upload", help=_t("live.upload_help"))
     if live_img is not None:
-        st.image(live_img, caption="Uploaded screenshot", width=600)
+        st.image(live_img, caption=_t("live.uploaded_caption"), width=600)
         if st.button(f"\U0001f50d {_t('live.analyze_btn')}", type="primary"):
             with st.spinner(_t("loading")):
                 pil_img = Image.open(live_img).convert("RGB"); frame = np.array(pil_img)[:,:,::-1].copy()
-                parser = CS2HudParser(CS2_STANDARD_16X9, {"crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
+                parser = CS2HudParser(CS2_STANDARD_16X9, {"crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(enable_numeric_ocr=True),
                     "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(), "round_info": RoundInfoExtractor()})
-                st.session_state["live_result"] = LiveAnalyzer(parser, _loader()).analyze(frame)
+                live_state = parser.parse(frame, 0, 0.0)
+                st.session_state["live_state"] = live_state
+                st.session_state["live_result"] = LiveAnalyzer(
+                    _CachedHudParser(live_state), _loader(),
+                ).analyze(frame)
     lr = st.session_state.get("live_result")
     if lr is not None:
         st.divider(); st.subheader(f"\U0001f3af {_t('live.results')}")
@@ -615,15 +879,25 @@ with t6:
                         round_label = img.event_id.removeprefix("round_keyframe_").rsplit("_", 1)[0]
                         st.image(
                             str(img.image_path),
-                            caption=f"{round_label} | t={img.timestamp_sec:.1f}s",
+                            caption=_t(
+                                "live.frame_caption",
+                                round=round_label,
+                                time=img.timestamp_sec,
+                            ),
                             width=150,
                         )
-                        if st.button(f"Analyze", key=f"live_frame_{i}"):
+                        if st.button(_t("live.analyze_frame"), key=f"live_frame_{i}"):
                             pil_img = Image.open(str(img.image_path)).convert("RGB")
                             frame = np.array(pil_img)[:,:,::-1].copy()
-                            parser = CS2HudParser(CS2_STANDARD_16X9, {"crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(),
+                            parser = CS2HudParser(CS2_STANDARD_16X9, {"crosshair": CrosshairExtractor(), "player_status": HPBarExtractor(enable_numeric_ocr=True),
                                 "kill_feed": KillFeedExtractor(), "money": MoneyExtractor(), "round_info": RoundInfoExtractor()})
-                            st.session_state["live_result"] = LiveAnalyzer(parser, _loader()).analyze(frame, timestamp_sec=img.timestamp_sec)
+                            live_state = parser.parse(
+                                frame, img.frame_index or 0, img.timestamp_sec,
+                            )
+                            st.session_state["live_state"] = live_state
+                            st.session_state["live_result"] = LiveAnalyzer(
+                                _CachedHudParser(live_state), _loader(),
+                            ).analyze(frame, timestamp_sec=img.timestamp_sec)
                             st.rerun()
 
 # JSON

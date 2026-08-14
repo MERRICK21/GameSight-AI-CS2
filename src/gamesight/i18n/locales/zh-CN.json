@@ -4,7 +4,48 @@
   "app": {
     "title": "GameSight AI",
     "subtitle": "CS2 POV 分析管线",
-    "version": "v0.1.0"
+    "version": "v0.1.0",
+    "test_count": "{n} 项测试"
+  },
+  "common": {
+    "yes": "是",
+    "no": "否",
+    "unavailable": "不可用",
+    "id": "编号",
+    "time": "时间",
+    "frame_time": "帧 {frame}｜时间 {time:.1f} 秒",
+    "evidence_line": "帧={frame}｜时间={time:.1f} 秒｜来源={source}"
+  },
+  "severity": {
+    "info": "信息",
+    "warning": "警告",
+    "critical": "严重"
+  },
+  "finding_categories": {
+    "combat": "战斗",
+    "movement": "移动",
+    "utility": "道具",
+    "teamplay": "团队配合",
+    "round_flow": "回合流程"
+  },
+  "hud_regions": {
+    "minimap": "小地图",
+    "round_info": "回合与计时器",
+    "kill_feed": "击杀栏",
+    "crosshair": "准星",
+    "money": "金钱",
+    "player_status": "生命与护甲",
+    "weapon_utility": "武器与道具"
+  },
+  "debug": {
+    "analyze": "分析截图",
+    "hud_regions": "HUD 区域",
+    "hud_values": "HUD 数值",
+    "advice": "建议",
+    "status": "状态",
+    "action": "行动",
+    "confidence": "置信度",
+    "empty_hint": "请在侧边栏切换到截图调试模式，上传截图后点击“分析截图”。"
   },
   "sidebar": {
     "input": "输入",
@@ -17,6 +58,12 @@
     "sample_fps_help": "白屏、架镜与视角信号的每秒采样数。回合 HUD 固定为 2 FPS，避免高帧率重复执行慢速解析。",
     "sampling_strategy": "视觉效果：{fps} FPS · 回合 HUD：2 FPS · 比分 OCR：每 2 秒",
     "language": "语言",
+    "mode": "模式",
+    "mode_video": "📁 视频分析",
+    "mode_screenshot": "📸 截图调试",
+    "debug_upload_title": "上传截图",
+    "debug_upload_label": "选择 CS2 截图",
+    "debug_loaded": "已加载 {n} 张截图",
     "player_filter": "按玩家筛选",
     "player_filter_help": "只分析你的视角画面。跳过死亡后的观战画面。",
     "player_name": "玩家名称",
@@ -30,6 +77,7 @@
   },
   "run": {
     "button": "开始分析",
+    "uploading": "正在上传视频...",
     "reading_meta": "正在读取视频元数据...",
     "processing": "正在处理帧 ({w}x{h}, {fps}fps)...",
     "processing_frame": "正在处理第 {n} 帧...",
@@ -40,7 +88,16 @@
     "aggregating": "正在聚合回合...",
     "building_report": "正在构建报告...",
     "personal_combat_unavailable": "在 CS2 原生 HUD 信号能够可靠归属前，个人击杀和死亡暂不可用；视频水印会被忽略。",
-    "cs2_model_unavailable": "CS2 敌方检测未启用，继续运行基础第一视角分析"
+    "personal_kills_unavailable": "个人击杀仍不可用；个人阵亡仅在原生生命 HUD 连续消失得到确认时统计，视频水印不会参与判断。",
+    "personal_kills_conservative": "个人击杀为保守下限：仅统计同时具备第一视角开火、敌方交战窗口和原生本机击杀高亮的事件；视频水印和玩家名字不会参与判断。",
+    "personal_kills_native": "个人击杀已通过 CS2 原生本机击杀高亮归属；原生阵亡信号不可用，因此暂不计算 K/D。视频水印和作者 ID 不参与判断。",
+    "personal_combat_native": "个人击杀与阵亡均通过 CS2 原生 HUD 归属；视频水印、作者 ID 和玩家名字不参与判断。",
+    "analysis_timed_out": "分析超时，仅处理到录像 {seconds:.1f} 秒；以下是部分结果，不能作为整场回合数或 K/D。",
+    "partial_complete": "部分分析结束（处理至 {seconds:.1f} 秒）",
+    "cs2_model_unavailable": "CS2 敌方检测未启用，继续运行基础第一视角分析",
+    "clip_unavailable": "事件短视频生成不可用，静态证据仍会保留",
+    "ocr_fallback": "未安装 EasyOCR。将回退到计时器间隔回合检测。可运行：pip install easyocr。",
+    "eta": "预计剩余 {seconds:.0f} 秒"
   },
   "tabs": {
     "overview": "概览",
@@ -56,6 +113,7 @@
     "rounds": "回合数",
     "duration": "时长",
     "kills": "击杀",
+    "kills_lower_bound": "击杀（保守下限）",
     "deaths": "死亡",
     "enemy_tracks": "敌方轨迹",
     "resolution": "分辨率",
@@ -71,7 +129,8 @@
     "scoped": "开镜时间",
     "view_motion": "视角活动度",
     "stationary": "静止画面",
-    "engagements": "交战窗口"
+    "engagements": "遇敌 / 疑似交战",
+    "partial_result": "这是超时后的部分结果：带 * 的回合数以及当前击杀/死亡均不能代表整场比赛，请降低分析帧率或关闭交战检测后重试。"
   },
   "timeline": {
     "title": "事件时间线",
@@ -102,7 +161,9 @@
     "category_col": "类别",
     "frame_col": "帧",
     "time_col": "时间",
-    "source_col": "来源"
+    "source_col": "来源",
+    "clips_title": "事件短视频",
+    "clips_help": "每段包含事件前 2 秒和后 3 秒；视频为无声 H.264 复盘片段。"
   },
   "json": {
     "title": "原始 JSON",
@@ -122,6 +183,7 @@
     "action": "建议行动",
     "confidence": "置信度",
     "evidence": "证据",
+    "clip_range": "复盘片段：{start:.1f}s–{end:.1f}s",
     "categories": {
       "aim": "瞄准",
       "positioning": "站位",
@@ -144,8 +206,7 @@
   "coach_reasoning": {
     "death_heavy": "本回合你死亡 {deaths} 次，仅击杀 {kills} 次。你的站位可能过于激进或暴露。",
     "aggressive": "强势回合！{kills} 次击杀，零死亡。你的枪法和交战时机都很出色。",
-    "late_contact": "首次遇敌在 {time:.1f} 秒（占回合 {pct:.0f}%）。这表明打法偏被动或地图控制较慢。",
-    "early_contact": "遇敌时间 {time:.1f} 秒 -- 非常早。你可能在没有道具掩护的情况下冲入交战区域。",
+    "contact_context": "本回合开始后 {time:.1f} 秒首次确认敌方可见。该时间只用于定位接敌事件；不与实际回合时长计算比例，也不据此判断推进快慢。",
     "no_combat": "在 {duration:.0f} 秒的回合中无击杀或死亡。你可能过于被动或与团队脱节。",
     "combat_density": "高交战密度：{total} 次交战 / {duration:.0f} 秒（{density:.1f} 次/分钟）。",
     "kd_improving": "K/D 正在提升：前半段 {early:.1f} -> 后半段 {late:.1f}。你在比赛进程中适应得很好。",
@@ -155,13 +216,14 @@
     "inconsistent": "回合间波动较大：击杀数从 {min} 到 {max}（平均 {avg:.1f}）。你的表现不够稳定。",
     "flash_episode": "此处连续白屏约 {seconds:.1f} 秒，已定位到具体发生时刻。",
     "scope_episode": "此处连续架镜约 {seconds:.1f} 秒，外围信息获取可能受限。",
-    "engagement_window": "本回合开始后 {time:.1f} 秒检测到敌方角色，已建立有画面证据的交战复盘窗口。"
+    "engagement_window": "本回合开始后 {time:.1f} 秒检测到敌方角色；敌方在 {samples} 个采样帧中可见，观测跨度 {span:.1f} 秒，已建立遇敌复盘窗口。",
+    "likely_firefight": "本回合开始后 {time:.1f} 秒检测到敌方角色；敌方在 {samples} 个采样帧中可见，观测跨度 {span:.1f} 秒，附近出现 {shots} 个开火视觉候选与 {damage} 个受伤视觉候选，因此标记为疑似交战。",
+    "native_death": "本回合开始后 {time:.1f} 秒，原生生命 HUD 在此前稳定可见后连续消失约 {seconds:.1f} 秒，已标记为第一视角疑似阵亡。"
   },
   "coach_action": {
     "death_heavy": "在掩体后架枪。探点前先使用闪光弹/烟雾弹。只在有明确优势时对枪。",
     "aggressive": "保持准星预瞄习惯。每次击杀后检查站位，不要过度前压。",
-    "late_contact": "更早地控制地图关键区域。在前 15-20 秒使用道具争夺位置。",
-    "early_contact": "推进前使用闪光弹/烟雾弹。与队友协调以获得补枪机会。",
+    "contact_context": "复盘该帧前后约 2 秒：接敌前是否完成急停、准星是否覆盖预期头线、身体暴露与最近掩体，以及本次 peek 是否有信息、道具或补枪支持。评价地图节奏还需要地图、阵营、出生点与路线证据，当前信息不足时不下结论。",
     "no_combat": "与队友沟通。站在可以补枪的位置。如果打自由人，确保时机与团队同步。",
     "combat_density": "优先保证存活而非追击杀。占据有利位置，让对手犯错。",
     "kd_improving": "比赛前通过热身来确保从第一回合就进入状态。",
@@ -171,7 +233,13 @@
     "inconsistent": "注重稳定性。比赛前打 10 分钟死斗模式来稳定枪感。",
     "flash_exposure": "看到来闪时及时背闪并借掩体规避，恢复视野后再探。",
     "scope_hold": "长时间架镜时定期退镜获取外围信息，避免只盯一个角度。",
-    "engagement_review": "查看此帧前后约 2 秒：检查准星是否处在可能出现敌人的高度、身体是否有掩体，以及开枪后能否撤回或被队友补枪。"
+    "engagement_review": "播放遇敌短片，检查接敌前是否完成急停、准星是否覆盖预期头线、身体暴露与最近掩体，以及 peek 是否有信息、道具或补枪支持；当前只有敌方可见证据，不推断已经开枪，也不根据遇敌时间判断推进快慢。",
+    "firefight_review": "播放事件短片，按接敌前预瞄、第一次开枪、受到反击、撤回或补枪四个阶段复盘；视觉信号只是候选，需以视频确认。",
+    "incoming_damage_review": "短片中检测到受伤视觉候选但没有可靠的开火候选；重点确认是否在未还击时暴露，并检查最近的撤回掩体路线。",
+    "precontact_fire_review": "开火视觉候选早于首次看见敌方；复盘这是合理的预开火、穿射或无关画面变化，并确认预瞄点是否有依据。",
+    "immediate_fire_review": "开火视觉候选紧邻首次遇敌；复盘第一发前是否已经停稳、准星是否位于目标高度，以及射击后有没有及时回到掩体。",
+    "delayed_fire_review": "首次看见敌方后较晚才出现开火视觉候选；复盘延迟来自目标确认、准星修正、移动未停还是被掩体阻挡。",
+    "native_death_review": "播放阵亡短片，依次检查最后一次安全掩体、首次暴露、是否重复 peek 同一枪线、能否撤回，以及队友能否补枪；HUD 转场可归属第一视角，但仍以短片确认具体死因。"
   },
   "live": {
     "title": "实时分析",
@@ -179,6 +247,9 @@
     "upload_label": "上传游戏截图",
     "upload_help": "从 CS2 游戏中截取的 JPG 或 PNG 截图。",
     "analyze_btn": "分析截图",
+    "analyze_frame": "分析",
+    "uploaded_caption": "已上传的截图",
+    "frame_caption": "{round}｜时间 {time:.1f} 秒",
     "results": "战术建议",
     "next_action": "推荐行动",
     "status": "当前状态",
@@ -197,9 +268,11 @@
     "round_truncated": "回合在视频结束前未完成 -- 分析可能不完整。",
     "kills_detected": "本回合检测到 {n} 次击杀。",
     "deaths_detected": "本回合检测到 {n} 次死亡。",
+    "native_death_detected": "原生生命 HUD 的连续消失确认本回合第一视角阵亡。",
     "no_combat": "本回合未检测到击杀或死亡。",
     "enemy_first_visible": "首次遇敌在 {time:.1f} 秒。",
     "enemy_tracks": "本回合有 {n} 个敌方玩家轨迹。",
+    "likely_firefight": "本回合有 {n} 个遇敌窗口同时包含开火或受伤视觉候选，已标记为疑似交战。",
     "match_rounds": "分析了视频 \"{vid}\" 的 {n} 个回合（时长 {dur} 秒）。",
     "match_total_kills": "全部回合共检测到 {n} 次击杀。",
     "match_total_deaths": "全部回合共检测到 {n} 次死亡。",
@@ -216,12 +289,13 @@
     "action_hp_critical": "立即撤回掩体后。等待队友支援或守住防守角度。",
     "action_hp_low": "守住一个非常规角度。避免干拉常规点位。",
     "action_freeze": "准备下一回合：检查经济并规划购买。",
+    "action_context_required": "结合小地图、队友位置、声音和回合目标再决定继续架枪或移动；单张截图不足以确定最优行动。",
     "tip_hp_critical": "{hp} HP 下任何步枪子弹都能击杀你。留在掩体后让队友补枪。",
     "tip_hp_low": "考虑让队友发枪或交换站位。",
-    "tip_armour_low": "护甲值低。下回合经济允许时购买全甲。",
-    "tip_crosshair_steady": "准星稳定 -- 适合预瞄常规角度。",
-    "tip_crosshair_moving": "未检测到准星 -- 你可能在移动中。停下并重新瞄准。",
-    "tip_killfeed": "击杀信息活跃 -- 附近有人被消灭。",
+    "tip_armour_low": "护甲值较低（{armour:.0f}）。下回合经济允许时补充防弹衣并确保有头盔。",
+    "tip_crosshair_steady": "已检测到准星；单张截图不能判断准星是否稳定或急停是否完成。",
+    "tip_crosshair_moving": "未检测到准星；开镜、切换道具、HUD 设置或画面遮挡都可能导致该结果，单张截图不判断移动状态。",
+    "tip_killfeed": "击杀信息显示中；击杀栏是全局信息，单张截图不能判断交战距离或是否发生在附近。",
     "tip_killfeed_cautious": "小心：附近刚发生交火。守住当前位置或安全转点。",
     "tip_money": "检查经济状况，规划下回合购买。",
     "tip_default": "未检测到特定威胁 -- 保持地图意识，关注小地图。",
@@ -229,6 +303,33 @@
     "round_inactive": "回合未激活（冻结时间或已结束）"
   },
   "summary_title": "赛后总结",
+  "coach_summary": {
+    "kd_strong": "整场 K/D 为 {ratio:.1f}，个人击杀明显多于阵亡。",
+    "kd_low": "整场 K/D 为 {ratio:.1f}，优先复盘阵亡前的暴露、撤回掩体和补枪条件。",
+    "kd_balanced": "整场 K/D 为 {ratio:.1f}，击杀与阵亡较为接近。",
+    "aim_strength": "检测到多个多杀回合，可重点复盘其中可复现的首发命中与转移目标过程。",
+    "positioning_weakness": "检测到多个站位相关复盘窗口，需要检查暴露范围、掩体和撤回路线。",
+    "positioning_drill": "每天在本地服务器练习 10 分钟急停、短身位 peek 和撤回掩体。",
+    "positioning_focus": "站位与掩体：减少无信息暴露，并保留安全撤回路线。",
+    "game_sense_weakness": "证据事件中出现了多个游戏意识复盘窗口。",
+    "game_sense_drill": "每周观看 1–2 场职业第一视角录像，记录有上下文的时机、路线和道具选择。",
+    "game_sense_focus": "游戏意识：结合地图、阵营、出生点与队伍信息复盘时机，而不是只看事件秒数。",
+    "teamplay_weakness": "部分证据需要进一步检查补枪距离、信息共享和队友协同。",
+    "teamplay_focus": "团队配合：明确报点、行动意图和可补枪位置。",
+    "early_death_weakness": "多次在回合前段阵亡，需要复盘首次暴露与撤回条件。",
+    "early_death_drill": "在熟悉的地图逐段检查安全路线、常见枪线与最近掩体。",
+    "consistency_weakness": "各回合个人击杀数据波动较大。",
+    "consistency_drill": "赛前进行固定且短时的急停、定位与死斗热身，保持练习变量一致。",
+    "streak_weakness": "连续多个回合个人击杀少于阵亡，需要逐回合检查决策而非仅归因于状态。",
+    "streak_focus": "连续不利回合后重新确认经济、站位和队伍计划。",
+    "assessment_solid": "共分析 {rounds} 个回合。当前证据显示基础表现较稳定，下一步重点关注：{focus}。",
+    "assessment_growth": "共分析 {rounds} 个回合。当前证据中有较多可改进窗口，优先关注：{focus}。",
+    "focus_separator": "；",
+    "default_strength": "继续积累带有明确事件证据的比赛录像。",
+    "default_weakness": "当前没有足够证据确认明显短板。",
+    "default_drill": "继续比赛并记录录像，以便进行跨场次对比。",
+    "default_focus": "保持各项基础操作与决策的一致性"
+  },
   "combat_unavailable": {
     "strength": "已通过原生计分板可靠重建 {rounds} 个回合。",
     "weakness": "当前 HUD 尚不能安全归属个人击杀和死亡。",
@@ -236,12 +337,22 @@
     "focus": "第一视角站位、准星位置和决策时机。",
     "assessment": "已从 CS2 原生计分板识别 {rounds} 个回合。系统不会使用无关水印推断 K/D，因此暂不生成 K/D 教练结论。"
   },
+  "personal_kill_unavailable": {
+    "weakness": "个人击杀仍无法从当前 HUD 安全归属；原生生命 HUD 可用于保守识别阵亡。",
+    "assessment": "已识别 {rounds} 个回合，并通过原生 HUD 转场识别 {deaths} 次第一视角阵亡。个人击杀仍不参与 K/D 或教练结论。"
+  },
+  "personal_kill_lower_bound": {
+    "strength": "已通过第一视角开火、敌方交战和原生本机击杀高亮三项证据，保守确认至少 {kills} 次个人击杀。",
+    "weakness": "个人击杀是保守下限；未同时满足三项视觉证据的击杀不会计入，因此不能据此计算精确 K/D。",
+    "assessment": "已识别 {rounds} 个回合、至少 {kills} 次第一视角击杀和 {deaths} 次第一视角阵亡。击杀数为保守下限，系统不会生成精确 K/D 结论。"
+  },
   "first_person_summary": {
     "flash_weakness": "一个或多个回合的白屏暴露时间偏长。",
     "flash_drill": "在常见进攻路线与队友练习背闪和恢复视野后的再探时机。",
     "scope_focus": "长时间架镜时注意退镜刷新外围信息。",
     "engagement_strength": "已从第一视角画面定位到可复盘的真实遇敌窗口。",
-    "engagement_focus": "围绕已确认遇敌帧，复盘前后 2 秒的预瞄、掩体与补枪条件。"
+    "engagement_focus": "围绕已确认遇敌帧，复盘前后 2 秒的预瞄、掩体与补枪条件。",
+    "death_focus": "围绕原生 HUD 确认的阵亡短片，复盘最后一次可撤回掩体和暴露时机。"
   },
   "strengths": "优势",
   "weaknesses": "短板",

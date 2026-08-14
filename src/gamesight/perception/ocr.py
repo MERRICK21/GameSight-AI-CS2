@@ -222,3 +222,90 @@ class PlayerNameReader:
     @staticmethod
     def _normalise(value: str) -> str:
         return "".join(ch.casefold() for ch in value if ch.isalnum())
+
+
+class PlayerStatusValueReader:
+    """Read numeric values embedded in the native bottom status HUD.
+
+    This reader is intentionally opt-in.  Neural OCR is appropriate for a
+    user-selected screenshot, but is too expensive for every sampled video
+    frame.  The current implementation conservatively reads only the armour
+    value inside the native shield icon.
+    """
+
+    def __init__(self) -> None:
+        self._ocr = None
+        self._reader = None
+        self._init_attempted = False
+
+    @property
+    def available(self) -> bool:
+        if not self._init_attempted:
+            self._init_attempted = True
+            easy = _get_easyocr()
+            if easy is not None:
+                try:
+                    self._reader = easy.Reader(["en"], gpu=True, verbose=False)
+                    self._ocr = easy
+                except Exception:
+                    try:
+                        self._reader = easy.Reader(["en"], gpu=False, verbose=False)
+                        self._ocr = easy
+                    except Exception:
+                        pass
+        return self._ocr is not None and self._reader is not None
+
+    def read_armour(self, player_status_crop: NDArray[np.uint8]) -> int | None:
+        """Return native armour points, or ``None`` when not reliable."""
+        if not self.available or player_status_crop.size == 0:
+            return None
+        height, width = player_status_crop.shape[:2]
+        # CS2 standard 16:9 player-status region: the shield and its number
+        # occupy the lower-left corner.  A tight crop avoids the adjacent HP
+        # value while retaining the digits drawn inside the shield.
+        shield = player_status_crop[
+            int(height * 0.62): int(height * 0.91),
+            0: max(1, int(width * 0.052)),
+        ]
+        if shield.size == 0:
+            return None
+        try:
+            results = self._reader.readtext(
+                shield,
+                detail=1,
+                allowlist="0123456789",
+                mag_ratio=4,
+                canvas_size=800,
+                text_threshold=0.15,
+                low_text=0.05,
+            )
+        except Exception:
+            return None
+        for _box, raw_text, confidence in results:
+            value = _parse_armour_value(str(raw_text), float(confidence))
+            if value is not None:
+                return value
+        return None
+
+
+def _parse_armour_value(raw_text: str, confidence: float) -> int | None:
+    """Parse armour digits while rejecting the shield-outline OCR artefact.
+
+    EasyOCR commonly sees the shield outline as a leading ``6`` (for example
+    ``6100`` for 100 armour and ``650`` for 50 armour).  We only accept
+    conservative patterns bounded by CS2's 0--100 armour range.
+    """
+    digits = "".join(ch for ch in raw_text if ch.isdigit())
+    if not digits:
+        return None
+    if "100" in digits:
+        return 100
+    if len(digits) in (2, 3):
+        trailing_two = int(digits[-2:])
+        if 10 <= trailing_two <= 99:
+            return trailing_two
+    if confidence >= 0.40:
+        value = int(digits)
+        if 0 <= value <= 100:
+            return value
+    return None

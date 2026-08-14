@@ -6,6 +6,7 @@ import numpy as np
 from gamesight.domain.models import Detection, EventType, RoundAnalysis
 from gamesight.perception.cs2_detector import (
     CS2FactionDetector, PlayerDetectionSample, build_engagement_events,
+    inference_stride,
 )
 
 
@@ -61,10 +62,46 @@ def test_builds_enemy_engagement_but_not_teammate_episode():
         item for item in events
         if item.event_type == EventType.ENEMY_FIRST_VISIBLE
     )
-    assert engagement.start_sec == 90.0
+    assert engagement.start_sec == 89.0
     assert engagement.evidence[0].frame_index == 2700
-    assert first_visible.start_sec == 90.0
+    assert first_visible.start_sec == 89.0
     assert engagement.attributes["enemy_team"] == "ct"
+    assert engagement.attributes["engagement_level"] == "visual_contact"
+    assert engagement.attributes["visible_sample_count"] == 2
+    assert engagement.attributes["observed_span_sec"] == 1.0
+
+
+def test_visual_combat_signal_upgrades_contact_to_likely_firefight():
+    rounds = [RoundAnalysis(round_id="round_002", start_sec=56, end_sec=100)]
+    samples = [
+        PlayerDetectionSample(2610, 87.0, "t", (
+            Detection(label="ct", confidence=.8, bbox_xyxy=(10, 10, 30, 80),
+                      frame_index=2610, timestamp_sec=87.0),
+        )),
+    ]
+    visual_samples = [
+        SimpleNamespace(
+            frame_index=2625, timestamp_sec=87.5,
+            shot_candidate=True, damage_candidate=False,
+            shot_signal_score=.09, damage_signal_score=0.0,
+        ),
+    ]
+    events = build_engagement_events(rounds, samples, visual_samples)
+    engagement = next(
+        item for item in events
+        if item.event_type == EventType.ENGAGEMENT_CANDIDATE
+    )
+    assert engagement.attributes["engagement_level"] == "likely_firefight"
+    assert engagement.attributes["shot_candidate_count"] == 1
+    assert engagement.attributes["damage_candidate_count"] == 0
+    assert engagement.attributes["clip_trigger_sec"] == 87.5
+    assert engagement.attributes["first_visible_sec"] == 87.0
+    assert engagement.attributes["last_visible_sec"] == 87.0
+    assert engagement.attributes["visible_sample_count"] == 1
+    assert engagement.attributes["observed_span_sec"] == 0.0
+    assert engagement.attributes["first_shot_candidate_sec"] == 87.5
+    assert engagement.attributes["first_shot_offset_sec"] == 0.5
+    assert len(engagement.evidence) == 2
 
 
 def test_unknown_player_team_never_guesses_enemy_identity():
@@ -74,3 +111,17 @@ def test_unknown_player_team_never_guesses_enemy_identity():
                   frame_index=30, timestamp_sec=1),
     ))
     assert build_engagement_events(rounds, [sample]) == []
+
+
+def test_neural_inference_is_capped_when_visual_sampling_is_high():
+    assert inference_stride(2.0, 2.0) == 1
+    assert inference_stride(10.0, 2.0) == 5
+
+
+def test_inference_stride_rejects_invalid_rates():
+    try:
+        inference_stride(0.0, 2.0)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("zero sample FPS must be rejected")

@@ -22,6 +22,13 @@ class PlayerDetectionSample:
     detections: tuple[Detection, ...]
 
 
+def inference_stride(sample_fps: float, target_fps: float = 2.0) -> int:
+    """Return the sampled-frame stride needed to cap neural inference rate."""
+    if sample_fps <= 0 or target_fps <= 0:
+        raise ValueError("sample_fps and target_fps must be positive")
+    return max(1, round(sample_fps / target_fps))
+
+
 class CS2FactionDetector:
     """Detect T/CT bodies with a CS2-trained Ultralytics model.
 
@@ -91,6 +98,7 @@ class CS2FactionDetector:
 def build_engagement_events(
     rounds: list[RoundAnalysis],
     samples: Sequence[PlayerDetectionSample],
+    visual_samples: Sequence[object] = (),
     max_episodes_per_round: int = 4,
     merge_gap_sec: float = 2.1,
 ) -> list[GameEvent]:
@@ -134,6 +142,42 @@ def build_engagement_events(
             )
             first_sample = episode[0][0]
             last_sample = episode[-1][0]
+            nearby_signals = [
+                sample for sample in visual_samples
+                if first_sample.timestamp_sec - 1.5
+                <= float(getattr(sample, "timestamp_sec", -1.0))
+                <= last_sample.timestamp_sec + 1.5
+            ]
+            shot_signals = [
+                sample for sample in nearby_signals
+                if bool(getattr(sample, "shot_candidate", False))
+            ]
+            damage_signals = [
+                sample for sample in nearby_signals
+                if bool(getattr(sample, "damage_candidate", False))
+            ]
+            combat_signals = shot_signals + damage_signals
+            signal_sample = max(
+                combat_signals,
+                key=lambda sample: max(
+                    float(getattr(sample, "shot_signal_score", 0.0)),
+                    float(getattr(sample, "damage_signal_score", 0.0)),
+                ),
+                default=None,
+            )
+            likely_firefight = signal_sample is not None
+            first_shot_sec = (
+                min(float(getattr(sample, "timestamp_sec")) for sample in shot_signals)
+                if shot_signals else None
+            )
+            first_damage_sec = (
+                min(float(getattr(sample, "timestamp_sec")) for sample in damage_signals)
+                if damage_signals else None
+            )
+            clip_trigger_sec = (
+                float(getattr(signal_sample, "timestamp_sec"))
+                if signal_sample is not None else best_sample.timestamp_sec
+            )
             attributes = {
                 "round_id": round_analysis.round_id,
                 "player_team": first_sample.player_team,
@@ -141,6 +185,30 @@ def build_engagement_events(
                 "max_confidence": round(best_detection.confidence, 4),
                 "bbox_xyxy": ",".join(
                     str(round(value, 1)) for value in best_detection.bbox_xyxy
+                ),
+                "engagement_level": (
+                    "likely_firefight" if likely_firefight else "visual_contact"
+                ),
+                "shot_candidate_count": len(shot_signals),
+                "damage_candidate_count": len(damage_signals),
+                "clip_trigger_sec": round(clip_trigger_sec, 3),
+                "first_visible_sec": round(first_sample.timestamp_sec, 3),
+                "last_visible_sec": round(last_sample.timestamp_sec, 3),
+                "visible_sample_count": len(episode),
+                "observed_span_sec": round(
+                    max(0.0, last_sample.timestamp_sec - first_sample.timestamp_sec),
+                    3,
+                ),
+                "first_shot_candidate_sec": (
+                    round(first_shot_sec, 3) if first_shot_sec is not None else None
+                ),
+                "first_damage_candidate_sec": (
+                    round(first_damage_sec, 3)
+                    if first_damage_sec is not None else None
+                ),
+                "first_shot_offset_sec": (
+                    round(first_shot_sec - first_sample.timestamp_sec, 3)
+                    if first_shot_sec is not None else None
                 ),
             }
             event_id = (
@@ -151,10 +219,16 @@ def build_engagement_events(
                 timestamp_sec=best_sample.timestamp_sec,
                 source="CS2FactionDetector.opposing_faction",
             )]
+            if signal_sample is not None:
+                evidence.append(Evidence(
+                    frame_index=int(getattr(signal_sample, "frame_index")),
+                    timestamp_sec=float(getattr(signal_sample, "timestamp_sec")),
+                    source="FirstPersonAnalyzer.combat_visual_candidate",
+                ))
             events.append(GameEvent(
                 event_id=event_id,
                 event_type=EventType.ENGAGEMENT_CANDIDATE,
-                start_sec=best_sample.timestamp_sec,
+                start_sec=first_sample.timestamp_sec,
                 end_sec=last_sample.timestamp_sec,
                 confidence=min(.92, .58 + best_detection.confidence * .4),
                 evidence=evidence,
@@ -164,7 +238,7 @@ def build_engagement_events(
                 events.append(GameEvent(
                     event_id=f"enemy_first_visible_{round_analysis.round_id}",
                     event_type=EventType.ENEMY_FIRST_VISIBLE,
-                    start_sec=best_sample.timestamp_sec,
+                    start_sec=first_sample.timestamp_sec,
                     confidence=min(.92, .58 + best_detection.confidence * .4),
                     evidence=evidence,
                     attributes=attributes,
