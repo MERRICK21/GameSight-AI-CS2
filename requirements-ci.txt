@@ -5,4 +5,5 @@ pydantic>=2.8,<3.0
 PyYAML>=6.0,<7.0
 numpy>=1.26,<3.0
 opencv-python-headless>=4.10,<5.0
+av>=16.0,<17.0
 pytest>=8.0,<9.0
