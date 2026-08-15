@@ -1,0 +1,8 @@
+# Lightweight dependencies for unit and signal-level regression tests.
+# GPU, YOLO, EasyOCR, Streamlit, and local model weights are intentionally
+# excluded because the test suite injects or statically checks those paths.
+pydantic>=2.8,<3.0
+PyYAML>=6.0,<7.0
+numpy>=1.26,<3.0
+opencv-python-headless>=4.10,<5.0
+pytest>=8.0,<9.0

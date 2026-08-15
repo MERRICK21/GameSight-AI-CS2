@@ -6,6 +6,65 @@
 
 ---
 
+## Latest Improvements (2026-08-15)
+
+### `test2` native K/D regression fixed
+- **Verified match total restored to 25/14**: a complete 10 FPS native-HUD pass over `test_video/test2.mp4` now returns 25 POV kills and 14 POV deaths across 22 rounds, matching the supplied ground truth.
+- **Sequential multi-kills no longer collapse**: the local kill-feed tracker now counts a fresh native row inserted below an existing row even when the feed remains continuously visible. This recovers the four-kill final round while visual fingerprints still merge persistence/fade frames.
+- **White HP digits no longer create false deaths**: low-saturation health glyphs require multiple text-shaped components and edge structure; bright flat patches and normal white HUD themes no longer flicker into death events.
+- **Top player-card death evidence added**: the native orange-selected roster card provides an independent life-state signal when a demo/recording immediately switches to another first-person HUD after death. The detector selects the left or right card per round from native highlight evidence, so the halftime side swap is handled without a fixed timestamp or player-name OCR.
+- **Creator overlays remain out of scope**: the lower-centre key display and relocated voice widget do not overlap either K/D evidence region and are not used for player identity.
+- **Regression verification**: the focused K/D/report/coach tests pass, the full suite is now **505 passing**, and both a full 10 FPS pass and the website-equivalent `2 FPS base + 10 FPS candidate windows` pass produced exactly `25 kills / 14 deaths`.
+
+### Creator-overlay and damaged-frame robustness
+- **`test_video/test2.mp4` added as a local HUD/noise regression source**: the 1914x1080, 30 FPS, 1059-second recording contains a persistent lower-centre keyboard/mouse display and a relocated transient voice widget. The recording remains local and is not committed.
+- **Creator input display excluded from camera-motion metrics**: the confirmed lower-centre overlay is masked only for descriptive view-motion calculation. It does not suppress native health, timer, kill-feed, weapon, death, or engagement evidence.
+- **Relocated UI noise is rejected generically**: motion is now calculated from a robust 6x8 tile distribution, discarding the most locally changing 20% of tiles. Voice widgets, subtitles, chat popups, and animated watermarks can no longer dominate a scene-wide movement score merely because their position changed.
+- **Noise diagnostics are auditable**: each first-person sample records a `localized_overlay_score`; match metadata reports how many sampled frames contained strongly localized changes and confirms that the creator-overlay motion filter was active.
+- **Single-frame decode recovery added**: a failed compressed-video sample now triggers a bounded seek to the next sample instead of silently ending the entire match. Three consecutive failures still stop safely, mark the analysis incomplete, disable K/D/coaching conclusions, and show a localized partial-decode warning.
+- **Real-video validation completed**: `test2` scanned through 1059.0s at 2 FPS with 0 decode failures and 91.88% non-flash native-health coverage; 16.42% of samples exposed localized overlay changes. The `test1` compatibility scan still reached 1161.5s with 0 decode failures and 98.52% health coverage.
+
+### Match-level regression and continuous integration
+- **Lightweight ground-truth fixture added**: `tests/fixtures/test1_native_signals.json` stores anonymized round, native kill-highlight, HUD-presence, and artefact signals rather than video frames, names, watermarks, or the 1.3 GB source recording.
+- **Cross-rate K/D regression added**: the fixture reconstructs 18 rounds, 20 kills, and 10 deaths at match level; separate 10 FPS and 2 FPS scenarios retain the required round-11 and open round-18 kills while rejecting six one-frame outline artefacts.
+- **GitHub Actions CI added**: every push and pull request runs the complete pytest suite on Python 3.11, compiles `src/` and `tests/`, and validates both locale JSON files.
+- **CI dependency set isolated**: `requirements-ci.txt` excludes GPU, YOLO, EasyOCR, Streamlit, local weights, and source recordings so ordinary correctness checks remain fast and reproducible on GitHub-hosted runners.
+- **README CI visibility added**: the repository now exposes the Python CI status badge at the top of the README.
+
+### Prioritized roadmap
+- [x] **1. Match-level accuracy regression**: preserve round count, K/D, sparse-sampling anchors, multi-kill behavior, open final rounds, and false-outline rejection in fast automated fixtures. Expand with additional authorized recordings and HUD variants over time.
+- [x] **2. GitHub Actions quality gate**: run tests, compilation, locale validation, and signal-level regressions automatically on pushes and pull requests.
+- [x] **3. Two-stage video analysis**: the full recording is scanned at no more than 2 FPS for round/OCR integrity; only candidate kill, death, flash, scope, fire/damage, and enemy-contact windows are decoded at the selected higher FPS.
+- [x] **4. Detection diagnostics and correction UI**: personal combat events expose round, timestamp, confidence, method and source; users can reject false positives, add missed kills/deaths by round-relative time, immediately rebuild reports/coaching, and export correction labels.
+- [x] **5. Context-aware coaching inputs**: native side evidence is represented explicitly while clock, weapon, economy, utility, map and position remain unknown until evidenced. Encounter coaching states the missing inputs and abstains from unsupported pace, buy, rotation, utility and position verdicts.
+
+### Adaptive analysis, auditability and coaching context
+- **Round reconstruction is isolated from high-rate work**: scoreboard OCR and native round HUD signals always traverse the complete recording at the stable base rate, preventing a 10 FPS setting from turning a timeout into a false partial match.
+- **Candidate-only refinement added**: high-rate first-person analysis runs only around auditable signals and uses windowed sequential decoding; quiet footage is skipped with OpenCV `grab()` rather than decoded twice.
+- **Mixed-rate metrics corrected**: flash, scope, viewport-motion and stationary-view summaries use time-weighted samples so candidate windows cannot distort whole-round percentages.
+- **Diagnostics tab added**: raw personal kill/death claims remain immutable while accepted/rejected labels and manually added misses produce a corrected analysis view.
+- **Corrections propagate immediately**: match totals, per-round reports and AI Coach output are rebuilt after each edit; label JSON retains source recording, event evidence, confidence and acceptance state for future fixtures.
+- **Typed context evidence added**: each round carries timestamped native player-side, clock and first-person weapon observations; money, utility, map and position remain explicitly unknown until evidenced.
+- **Coach evidence gate added**: encounter reasoning lists known and unavailable context and refuses to infer tactical conclusions that require missing inputs.
+
+### Native round clock and held-weapon context
+- **Round-clock OCR shares the existing sparse score pass**: the centre-top native `M:SS` timer is read every two seconds without adding another full-video OCR schedule; GPU initialization falls back to CPU when needed.
+- **Clock continuity is mandatory**: a value enters coaching context only after at least two readings decrease consistently with elapsed video time. Single reads, static text and implausible jumps are discarded, and observed round duration is never converted into a game clock.
+- **First-person held view is the primary weapon source**: the new classifier interface supports pistol, rifle, SMG, shotgun, sniper, knife, grenade and C4 categories, while the native bottom-right equipment highlight is auxiliary only and cannot independently create a category.
+- **Initial built-in recognition is intentionally conservative**: native circular scope geometry establishes a sniper category, and the distinctive held C4 display/keypad establishes C4. Other categories remain unknown until a trained held-view backend or validated templates are supplied; absence of the optional equipment panel does not reduce primary evidence.
+- **Auditable context detail added to AI Coach**: each covered round displays the first verified clock, number of continuous clock reads, localized weapon categories and weapon-evidence frame count.
+
+### Economy, utility and map-position context
+- **Native money OCR added**: a tightly cropped bottom-left digit pass runs every eight seconds using the already-loaded OCR reader. Values must be within CS2's `$0-$16,000` range, divisible by `$50`, and repeat consistently inside the same round before becoming economy context.
+- **Ambiguous dollar-glyph reads abstain**: tokens such as `$450 -> 5450` are rejected instead of being reported as `$5,450`; a single high-confidence value is still insufficient without a stable second reading.
+- **Native location text added**: OCR reads only the bounded label beneath the minimap, then matches it against a controlled native-location vocabulary. Creator names, watermarks and arbitrary text never become positions.
+- **Conservative Mirage resolution added**: the match is identified as Mirage only from a strong native anchor such as `Palace Interior`/`Snipers Nest`, or multiple independent supporting anchors. Damaged A/B site glyphs with tied matches are rejected.
+- **Localized map evidence added**: verified money, held utility and `map / native position` now appear in the AI Coach context table in English or Simplified Chinese.
+- **Held-utility evidence channel added**: flashbang, smoke, HE, Molotov, incendiary and decoy categories are accepted from a high-confidence first-person held-view classifier; a bottom-right inventory highlight may only corroborate the same result and cannot create one. Because the supplied recording does not reliably expose the inventory panel and no trained held-grenade weights are bundled, utility remains unknown on frames without direct held-item evidence rather than inferring ownership from flash/smoke effects.
+- **Performance remains bounded**: money/location OCR is limited to active first-person frames at an eight-second cadence and reuses the score reader, avoiding another model load or high-rate full-video pass.
+
+---
+
 ## Latest Fixes (2026-08-14)
 
 ### Native kill-feed identity and deduplication
@@ -188,8 +247,10 @@
 ```
 VideoInput -> OpenCVVideoReader -> VideoFrame
     +-> CS2HudParser -> HudState (crosshair, HP, armour, kill feed, money, round info + scores)
-    +-> FirstPersonAnalyzer -> flash/scope/view-motion + native POV team samples
-    +-> NativeStatusDetector -> native health-HUD presence -> probable POV death events
+    +-> FirstPersonAnalyzer -> flash/scope/view-motion + native POV team + held weapon evidence
+    +-> ScoreReader -> native score/clock + sparse money/location OCR
+    +-> ContextBuilder -> stable economy + held utility + verified map/position
+    +-> NativeStatusDetector -> bottom health HUD + selected top player card -> POV death events
     +-> NativeKillDetector -> local-kill outline + POV fire + enemy engagement -> conservative POV kill events
     +-> [CS2FactionDetector -> T/CT bodies -> opposing-faction samples]  (optional, GPU-accelerated)
     -> Event Engine -> GameEvent[] (round_start/end, enemy_first_visible, engagement_candidate, visual moments)
@@ -199,14 +260,14 @@ EvidenceReportBuilder -> MatchReport -> JSON export
 RuleBasedCoach -> CoachSuggestion[] + CoachSummary
 OpenCVScreenshotExtractor -> EvidenceImage[]
 EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
-    -> Streamlit App (i18n EN/ZH, 7 tabs: Overview, Timeline, Report, Evidence, AI Coach, Live, JSON)
+    -> Streamlit App (i18n EN/ZH, 8 tabs: Overview, Timeline, Report, Evidence, AI Coach, Live, Diagnostics, JSON)
 ```
 
 ---
 
 ## Test Summary
 
-**464 passing**, 0 failures.
+**505 passing**, 0 failures.
 
 | Module | Tests |
 |--------|-------|
@@ -221,6 +282,7 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 | Internationalization | 10 |
 | AI Coach | 12 |
 | Evidence Screenshots | 11 |
+| Match-level Regression | 4 |
 
 ---
 

@@ -179,13 +179,7 @@ def _deduplicate_highlight_rows(
     unknown: list[list[object]] = []
     for episode in episodes:
         episode_tracks: list[dict[str, object]] = []
-        episode_row_limit = max(
-            1,
-            max(
-                len(tuple(getattr(sample, "local_kill_row_fingerprints", ())))
-                for sample in episode
-            ),
-        )
+        episode_row_limit = _episode_unique_row_limit(episode)
         for sample in episode:
             sample_tracks: list[dict[str, object]] = []
             fingerprints = tuple(getattr(
@@ -218,9 +212,9 @@ def _deduplicate_highlight_rows(
                     known.append(track)
                 else:
                     # A partially faded outline can distort its crop enough to
-                    # miss visual matching.  It cannot introduce a third kill
-                    # when no frame in this continuous feed episode ever shows
-                    # a third highlighted row.
+                    # miss visual matching.  Once all evidenced row insertions
+                    # in this episode have tracks, attach the distortion to
+                    # the most recent track instead of manufacturing a kill.
                     track = max(
                         episode_tracks,
                         key=lambda item: float(item["last_seen"]),
@@ -273,6 +267,45 @@ def _deduplicate_highlight_rows(
         getattr(episode[0], "timestamp_sec", 0.0)
     ))
     return result
+
+
+def _episode_unique_row_limit(episode: Sequence[object]) -> int:
+    """Estimate sequential local-kill insertions within one feed episode.
+
+    The feed can stay continuously visible across a multi-kill, so the peak
+    simultaneous row count is only a lower bound.  A fresh row is inserted
+    below the existing row; count that downward expansion after the feed has
+    returned to one row.  Position is geometry only and never reads names.
+    """
+    peak = max(
+        1,
+        max(
+            len(tuple(getattr(sample, "local_kill_row_fingerprints", ())))
+            for sample in episode
+        ),
+    )
+    insertions = 0
+    prior_count = 0
+    single_position: float | None = None
+    for sample in episode:
+        fingerprints = tuple(getattr(
+            sample, "local_kill_row_fingerprints", (),
+        ))
+        positions = tuple(getattr(sample, "local_kill_row_positions", ()))
+        count = len(fingerprints)
+        if count == 1 and positions:
+            single_position = float(positions[0])
+        elif (
+            count > prior_count
+            and count >= 2
+            and single_position is not None
+            and positions
+            and max(float(position) for position in positions)
+            - single_position >= .07
+        ):
+            insertions += count - max(1, prior_count)
+        prior_count = count
+    return max(peak, 1 + insertions)
 
 
 def _row_fingerprints_match(left: bytes, right: bytes) -> bool:

@@ -4,13 +4,16 @@ from gamesight.domain.models import EventType, Evidence, GameEvent, RoundAnalysi
 from gamesight.perception.native_kill import detect_native_kills
 
 
-def _sample(timestamp, *, highlighted=False, score=0.0, fingerprints=()):
+def _sample(
+    timestamp, *, highlighted=False, score=0.0, fingerprints=(), positions=(),
+):
     return SimpleNamespace(
         frame_index=int(timestamp * 30),
         timestamp_sec=timestamp,
         local_kill_highlight=highlighted,
         local_kill_highlight_score=score,
         local_kill_row_fingerprints=fingerprints,
+        local_kill_row_positions=positions,
     )
 
 
@@ -193,6 +196,27 @@ def test_two_simultaneous_highlighted_rows_cannot_reuse_one_track():
     )
 
     assert len(result.events) == 2
+
+
+def test_repeated_lower_row_insertions_expand_continuous_multikill():
+    result = detect_native_kills(
+        [_round()],
+        [
+            _sample(20.0, highlighted=True, score=.9,
+                    fingerprints=(b"first",), positions=(.32,)),
+            _sample(20.5, highlighted=True, score=.9,
+                    fingerprints=(b"first", b"second"), positions=(.32, .45)),
+            _sample(21.0, highlighted=True, score=.9,
+                    fingerprints=(b"second",), positions=(.32,)),
+            _sample(21.5, highlighted=True, score=.9,
+                    fingerprints=(b"third", b"fourth"), positions=(.32, .46)),
+            _sample(22.0, highlighted=True, score=.9,
+                    fingerprints=(b"third", b"fourth"), positions=(.32, .46)),
+        ],
+        [],
+    )
+
+    assert len(result.events) == 3
 
 
 def test_kill_is_retained_in_open_final_round():

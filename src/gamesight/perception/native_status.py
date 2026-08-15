@@ -64,6 +64,7 @@ def detect_native_deaths(
             continue
         eligible_rounds += 1
 
+        round_event_added = False
         index = 0
         while index < len(current):
             if current[index].health_hud_visible:
@@ -130,6 +131,88 @@ def detect_native_deaths(
                     "prior_visible_duration_sec": round(prior_visible_sec, 3),
                     "damage_candidate_nearby": nearby_damage,
                     "flash_bridge": bridging_flash,
+                    "clip_trigger_sec": round(run[0].timestamp_sec, 3),
+                },
+            ))
+            round_event_added = True
+            break
+
+        if round_event_added:
+            continue
+
+        # A clipped/demo recording can switch to another first-person HUD
+        # immediately after the POV death, so the bottom HP cluster remains
+        # visible.  The native top roster still dims the selected POV card.
+        # Pick the card side from its median orange selection highlight within
+        # this round; no fixed halftime timestamp or player-name OCR is used.
+        left_score = median([
+            float(sample.player_card_left_selected_score)
+            for sample in current
+            if sample.player_card_left_alive is not None
+        ] or [0.0])
+        right_score = median([
+            float(sample.player_card_right_selected_score)
+            for sample in current
+            if sample.player_card_right_alive is not None
+        ] or [0.0])
+        card_attribute = (
+            "player_card_left_alive"
+            if left_score > right_score else "player_card_right_alive"
+        )
+        selected_score = max(left_score, right_score)
+        if selected_score < .12:
+            continue
+        card_values = [getattr(sample, card_attribute) for sample in current]
+        if sum(value is True for value in card_values) < 2:
+            continue
+
+        index = 0
+        while index < len(current):
+            if card_values[index] is not False:
+                index += 1
+                continue
+            start = index
+            while index < len(current) and card_values[index] is False:
+                index += 1
+            run = current[start:index]
+            missing_sec = (run[-1].timestamp_sec - run[0].timestamp_sec) + step
+            prior_window_start = run[0].timestamp_sec - max(
+                2.0, min_prior_visible_sec + step,
+            )
+            prior = [
+                sample for sample in current[:start]
+                if sample.timestamp_sec >= prior_window_start
+                and getattr(sample, card_attribute) is True
+            ]
+            prior_visible_sec = len(prior) * step
+            if not (
+                run[0].timestamp_sec - round_analysis.start_sec >= 3.0
+                and missing_sec >= min_missing_sec
+                and missing_sec <= max_missing_sec
+                and prior_visible_sec >= min_prior_visible_sec
+            ):
+                continue
+            event_index = len(events) + 1
+            events.append(GameEvent(
+                event_id=f"native_player_death_{event_index:03d}",
+                event_type=EventType.PLAYER_DEATH,
+                start_sec=run[0].timestamp_sec,
+                confidence=.90,
+                evidence=[Evidence(
+                    frame_index=run[0].frame_index,
+                    timestamp_sec=run[0].timestamp_sec,
+                    source="NativeStatusDetector.player_card_disappearance",
+                )],
+                attributes={
+                    "round_id": round_analysis.round_id,
+                    "method": "native_player_card_disappearance",
+                    "hud_missing_duration_sec": round(missing_sec, 3),
+                    "prior_visible_duration_sec": round(prior_visible_sec, 3),
+                    "selected_card_side": (
+                        "left" if card_attribute.endswith("left_alive")
+                        else "right"
+                    ),
+                    "selected_card_score": round(selected_score, 4),
                     "clip_trigger_sec": round(run[0].timestamp_sec, 3),
                 },
             ))

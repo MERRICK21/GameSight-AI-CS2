@@ -24,6 +24,9 @@ from gamesight.evidence.extractor import (
 )
 from gamesight.i18n.loader import I18nLoader
 from gamesight.ingestion.video_reader import OpenCVVideoReader
+from gamesight.orchestration.adaptive import (
+    build_refinement_windows, merge_samples,
+)
 from gamesight.live.analyzer import LiveAnalyzer
 from gamesight.perception.extractors import (
     CrosshairExtractor, HPBarExtractor, KillFeedExtractor,
@@ -36,11 +39,16 @@ from gamesight.perception.first_person import (
 )
 from gamesight.perception.native_status import detect_native_deaths
 from gamesight.perception.native_kill import detect_native_kills
+from gamesight.perception.context import build_round_contexts, context_coverage
 from gamesight.perception.cs2_detector import (
     CS2FactionDetector, PlayerDetectionSample, build_engagement_events,
     inference_stride,
 )
 from gamesight.reporting.builder import EvidenceReportBuilder
+from gamesight.reporting.corrections import (
+    add_manual_events, apply_event_corrections, build_correction_export,
+    diagnostic_rows,
+)
 from gamesight.web.demo import generate_demo_events, generate_demo_tracks
 
 st.set_page_config(page_title="GameSight AI", page_icon="\U0001f3af", layout="wide", initial_sidebar_state="expanded")
@@ -54,6 +62,8 @@ if "analysis_run" not in st.session_state:
         "live_state": None, "locale": "en", "mode": "video",
         "content_locale": None, "debug_screenshots": [],
         "player_filter": False, "player_name": "", "use_yolo": False,
+        "analysis_base": None, "event_corrections": {},
+        "manual_events": [], "correction_revision": 0,
     })
 
 MAX_TIME_REAL = 1800   # 30 min max for long real-video analysis
@@ -61,6 +71,7 @@ MAX_TIME_DEMO = 60     # 1 min max for demo
 HUD_SAMPLE_FPS = 2.0   # Round/HUD state does not need high-rate analysis.
 YOLO_SAMPLE_FPS = 2.0  # Enemy contacts do not justify >2 neural passes/sec.
 SCORE_OCR_INTERVAL_SEC = 2.0  # Score persists throughout freeze time.
+CONTEXT_OCR_INTERVAL_SEC = 8.0  # Money/location text changes more slowly.
 def _loader(): return I18nLoader(st.session_state.get("locale", "en"))
 def _t(key: str, **kwargs) -> str: return _loader().t(key, **kwargs)
 
@@ -86,6 +97,12 @@ def _refresh_localized_outputs() -> None:
         deaths = caps.get("personal_deaths", personal)
         if analysis.video.video_id == "demo_cs2_match":
             warning = None
+        elif not complete and not caps.get("input_decode_complete", True):
+            processed = max(
+                [round_.end_sec or round_.start_sec for round_ in analysis.rounds]
+                or [0.0]
+            )
+            warning = _t("run.video_decode_partial", seconds=processed)
         elif not complete:
             processed = max(
                 [round_.end_sec or round_.start_sec for round_ in analysis.rounds]
@@ -126,6 +143,25 @@ def _refresh_localized_outputs() -> None:
     st.session_state["content_locale"] = st.session_state.get("locale", "en")
 
 
+def _rebuild_analysis_outputs(analysis: AnalysisResult) -> None:
+    """Make report and coach reflect the currently accepted event labels."""
+    st.session_state["analysis_obj"] = analysis
+    builder = EvidenceReportBuilder(loader=_loader())
+    report = builder.build(analysis, st.session_state.get("tracks"))
+    st.session_state["result"] = report.model_dump(mode="json")
+    if analysis.capabilities.get("analysis_complete", True):
+        coach = RuleBasedCoach(_loader())
+        suggestions = coach.generate(analysis, report)
+        st.session_state["coach_suggestions"] = suggestions
+        st.session_state["coach_summary"] = coach.summarize(
+            suggestions, analysis, report,
+        )
+    else:
+        st.session_state["coach_suggestions"] = []
+        st.session_state["coach_summary"] = None
+    st.session_state["content_locale"] = st.session_state.get("locale", "en")
+
+
 def _filter_post_death(analysis: AnalysisResult) -> tuple[AnalysisResult, int]:
     skipped = 0
     filtered_rounds = []
@@ -140,18 +176,25 @@ def _filter_post_death(analysis: AnalysisResult) -> tuple[AnalysisResult, int]:
         filtered_rounds.append(RoundAnalysis(round_id=ra.round_id, start_sec=ra.start_sec, end_sec=new_end, events=kept))
     return AnalysisResult(video=analysis.video, metadata=analysis.metadata, rounds=filtered_rounds,
                           warnings=analysis.warnings,
-                          capabilities=analysis.capabilities), skipped
+                          capabilities=analysis.capabilities,
+                          round_contexts=analysis.round_contexts,
+                          analysis_metadata=analysis.analysis_metadata), skipped
 
 
 def _real_pipeline(
     video_path: str, sample_fps: float, use_yolo: bool = False,
+    source_name: str | None = None,
 ) -> dict:
     t0 = time.time()
     st.session_state["status"] = _t("run.reading_meta"); st.session_state["progress"] = 5
-    video = VideoInput(video_id=Path(video_path).stem, path=Path(video_path))
+    video = VideoInput(
+        video_id=Path(video_path).stem, path=Path(video_path),
+        source_name=source_name,
+    )
     reader = OpenCVVideoReader(); metadata = reader.inspect(video)
     duration = metadata.duration_sec or 60
-    total_est = int(duration * sample_fps)
+    base_fps = min(float(sample_fps), HUD_SAMPLE_FPS)
+    total_est = int(duration * base_fps)
 
     st.session_state["status"] = _t("run.processing", w=metadata.width or 0, h=metadata.height or 0, fps=metadata.fps or 0)
     st.session_state["progress"] = 10
@@ -170,6 +213,9 @@ def _real_pipeline(
 
     hud_states = []
     score_events = []
+    clock_observations: list[dict] = []
+    money_observations: list[dict] = []
+    position_observations: list[dict] = []
     first_person_analyzer = FirstPersonAnalyzer()
     first_person_samples = []
     player_detection_samples: list[PlayerDetectionSample] = []
@@ -180,15 +226,16 @@ def _real_pipeline(
             faction_detector = CS2FactionDetector(model_path=model_path)
         except (FileNotFoundError, ImportError, RuntimeError) as exc:
             st.warning(f"{_t('run.cs2_model_unavailable')} ({exc})")
-    # The visual-effects FPS can be 10, but running YOLO at that same rate is
-    # prohibitively expensive and caused long recordings to time out with
-    # misleading partial match totals.  Cap neural inference at 2 FPS.
-    yolo_every = inference_stride(sample_fps, YOLO_SAMPLE_FPS)
+    # Stage 1 always scans the complete recording at no more than 2 FPS.  It
+    # owns round/OCR detection, so a high requested effects rate can never
+    # make round reconstruction slower or partial by itself.
+    yolo_every = inference_stride(base_fps, YOLO_SAMPLE_FPS)
     next_hud_timestamp = 0.0
     last_score_ocr_timestamp: float | None = None
+    last_context_ocr_timestamp: float | None = None
     timed_out = False
     processed_until_sec = 0.0
-    for i, frame in enumerate(reader.frames(video, sample_fps)):
+    for i, frame in enumerate(reader.frames(video, base_fps)):
         if time.time() - t0 > MAX_TIME_REAL:
             timed_out = True
             st.warning(_t(
@@ -233,20 +280,46 @@ def _real_pipeline(
                     read_score=should_read_score,
                 ))
                 if should_read_score:
+                    clock_observation = ocr_detector.latest_clock_observation
+                    if clock_observation is not None:
+                        clock_observations.append(clock_observation)
                     last_score_ocr_timestamp = frame.timestamp_sec
+                should_read_context = last_context_ocr_timestamp is None or (
+                    frame.timestamp_sec - last_context_ocr_timestamp
+                    >= CONTEXT_OCR_INTERVAL_SEC
+                )
+                if should_read_context:
+                    for observation in ocr_detector.read_native_context(
+                        state, frame.image,
+                        first_person_active=first_person_sample.health_hud_visible,
+                    ):
+                        kind = observation.get("kind")
+                        clean = {
+                            key: value for key, value in observation.items()
+                            if key != "kind"
+                        }
+                        if kind == "money":
+                            money_observations.append(clean)
+                        elif kind == "position":
+                            position_observations.append(clean)
+                    last_context_ocr_timestamp = frame.timestamp_sec
         if i % 30 == 0:
             elapsed = time.time() - t0
             if i > 0:
                 eta = elapsed / i * (total_est - i)
             else:
                 eta = 0
-            pct = min(10 + int(60 * i / max(total_est, 1)), 70)
+            pct = min(10 + int(45 * i / max(total_est, 1)), 55)
             st.session_state["progress"] = pct
             st.session_state["status"] = (
                 f"{_t('run.processing_frame', n=i)} | "
                 f"{_t('run.eta', seconds=eta)}"
             )
+    base_sampling_diagnostics = reader.last_sampling_diagnostics
 
+    # Round boundaries are established from the complete low-rate scan before
+    # any candidate refinement.  This is the guardrail that keeps round count
+    # independent from the requested high-rate effects analysis.
     n_states = len(hud_states)
     st.session_state["status"] = _t("run.detecting_events", n=n_states)
     st.session_state["progress"] = 75
@@ -269,6 +342,43 @@ def _real_pipeline(
     events.extend(ked.finalize())
 
     rounds = aggregate_events(events)
+
+    refinement_windows = build_refinement_windows(
+        first_person_samples,
+        player_detection_samples,
+        duration_sec=metadata.duration_sec,
+    )
+    refined_samples = []
+    refinement_sampling_diagnostics = None
+    if sample_fps > base_fps and refinement_windows and not timed_out:
+        st.session_state["status"] = _t(
+            "run.refining_windows", n=len(refinement_windows), fps=sample_fps,
+        )
+        refined_analyzer = FirstPersonAnalyzer()
+        refinement_est = max(1, int(sum(
+            window.end_sec - window.start_sec for window in refinement_windows
+        ) * sample_fps))
+        for i, frame in enumerate(reader.frames_in_windows(
+            video, sample_fps, refinement_windows,
+        )):
+            if time.time() - t0 > MAX_TIME_REAL:
+                timed_out = True
+                processed_until_sec = max(processed_until_sec, frame.timestamp_sec)
+                st.warning(_t(
+                    "run.analysis_timed_out", seconds=processed_until_sec,
+                ))
+                break
+            refined_samples.append(refined_analyzer.update(
+                frame.image, frame.frame_index, frame.timestamp_sec,
+            ))
+            if i % 30 == 0:
+                st.session_state["progress"] = min(
+                    55 + int(17 * i / refinement_est), 72,
+                )
+        refinement_sampling_diagnostics = reader.last_sampling_diagnostics
+        first_person_samples = merge_samples(
+            first_person_samples, refined_samples,
+        )
     engagement_events = build_engagement_events(
         rounds, player_detection_samples, first_person_samples,
     )
@@ -281,10 +391,16 @@ def _real_pipeline(
     events.extend(native_kills.events)
     events.extend(build_first_person_summary_events(rounds, first_person_samples))
     rounds = aggregate_events(events)
+    round_contexts = build_round_contexts(
+        rounds, first_person_samples, clock_observations,
+        money_observations, position_observations,
+    )
+    context_counts = context_coverage(round_contexts)
     st.session_state["progress"] = 85
     native_combat_available = (
         native_kills.available and native_deaths.available
     )
+    input_decode_complete = not base_sampling_diagnostics.truncated
     analysis_warnings = [_t(
         "run.personal_combat_native"
         if native_combat_available
@@ -298,7 +414,11 @@ def _real_pipeline(
             )
         )
     )]
-    if timed_out:
+    if not input_decode_complete:
+        analysis_warnings = [_t(
+            "run.video_decode_partial", seconds=processed_until_sec,
+        )]
+    elif timed_out:
         analysis_warnings = [_t(
             "run.analysis_timed_out",
             seconds=processed_until_sec,
@@ -309,20 +429,69 @@ def _real_pipeline(
         rounds=rounds,
         warnings=analysis_warnings,
         capabilities={
-            "analysis_complete": not timed_out,
-            "personal_combat": native_combat_available and not timed_out,
-            "personal_kills": native_kills.available and not timed_out,
-            "personal_deaths": native_deaths.available and not timed_out,
+            "analysis_complete": not timed_out and input_decode_complete,
+            "input_decode_complete": input_decode_complete,
+            "personal_combat": (
+                native_combat_available and not timed_out and input_decode_complete
+            ),
+            "personal_kills": (
+                native_kills.available and not timed_out and input_decode_complete
+            ),
+            "personal_deaths": (
+                native_deaths.available and not timed_out and input_decode_complete
+            ),
             "enemy_contact": faction_detector is not None,
+            "two_stage_analysis": sample_fps > base_fps,
+            "native_round_clock": context_counts["native_round_clock"] > 0,
+            "held_weapon_category": context_counts["weapon"] > 0,
+            "native_economy": context_counts["economy"] > 0,
+            "held_utility": context_counts["utility"] > 0,
+            "native_map_position": context_counts["map_position"] > 0,
+        },
+        round_contexts=round_contexts,
+        analysis_metadata={
+            "base_scan_fps": base_fps,
+            "requested_fps": float(sample_fps),
+            "refinement_window_count": len(refinement_windows),
+            "refined_sample_count": len(refined_samples),
+            "context_ocr_interval_sec": CONTEXT_OCR_INTERVAL_SEC,
+            "creator_overlay_motion_filter": True,
+            "localized_overlay_frame_count": sum(
+                sample.localized_overlay_score >= .45
+                for sample in first_person_samples
+            ),
+            "decode_failure_count": (
+                base_sampling_diagnostics.decode_failures
+                + (
+                    refinement_sampling_diagnostics.decode_failures
+                    if refinement_sampling_diagnostics is not None else 0
+                )
+            ),
+            "decode_recovery_count": (
+                base_sampling_diagnostics.recoveries
+                + (
+                    refinement_sampling_diagnostics.recoveries
+                    if refinement_sampling_diagnostics is not None else 0
+                )
+            ),
+            "decode_truncated": not input_decode_complete,
+            "processed_until_sec": round(processed_until_sec, 3),
+            "refinement_duration_sec": round(sum(
+                window.end_sec - window.start_sec
+                for window in refinement_windows
+            ), 2),
         },
     )
     if st.session_state.get("player_filter"):
         analysis, skipped = _filter_post_death(analysis)
         if skipped: st.session_state["status"] += f" ({_t('player_filter.skipped_frames', n=skipped)})"
+    st.session_state["analysis_base"] = analysis.model_copy(deep=True)
+    st.session_state["event_corrections"] = {}
+    st.session_state["manual_events"] = []
     st.session_state["analysis_obj"] = analysis
     coach = RuleBasedCoach(_loader()); builder = EvidenceReportBuilder(loader=_loader())
     cr = builder.build(analysis)
-    if timed_out:
+    if timed_out or not input_decode_complete:
         # Partial rounds must never feed match-level coaching conclusions.
         st.session_state["coach_suggestions"] = []
         st.session_state["coach_summary"] = None
@@ -336,7 +505,8 @@ def _real_pipeline(
     st.session_state["status"] = (
         f"{_t('run.partial_complete', seconds=processed_until_sec)} "
         f"({elapsed_total:.0f}s)"
-        if timed_out else f"{_t('run.complete')} ({elapsed_total:.0f}s)"
+        if timed_out or not input_decode_complete
+        else f"{_t('run.complete')} ({elapsed_total:.0f}s)"
     )
     st.session_state["content_locale"] = st.session_state.get("locale", "en")
     return cr.model_dump(mode="json")
@@ -353,6 +523,9 @@ def _demo_pipeline() -> dict:
         metadata=VideoMetadata(duration_sec=640.0, fps=30.0, width=1920, height=1080), rounds=rounds,
         capabilities={"personal_combat": True})
     if st.session_state.get("player_filter"): analysis, _ = _filter_post_death(analysis)
+    st.session_state["analysis_base"] = analysis.model_copy(deep=True)
+    st.session_state["event_corrections"] = {}
+    st.session_state["manual_events"] = []
     st.session_state["analysis_obj"] = analysis; st.session_state["tracks"] = tracks
     coach = RuleBasedCoach(_loader()); builder = EvidenceReportBuilder(loader=_loader())
     cr = builder.build(analysis, tracks)
@@ -449,7 +622,7 @@ with st.sidebar:
             st.session_state["debug_screenshots"] = debug_files
             st.caption(_t("sidebar.debug_loaded", n=len(debug_files)))
     st.divider(); st.caption(
-        f"{_t('app.version')} | {_t('app.test_count', n=464)}"
+        f"{_t('app.version')} | {_t('app.test_count', n=500)}"
     )
 
 if st.session_state.get("mode") == "screenshot":
@@ -514,7 +687,10 @@ if run_clicked:
     st.session_state["analysis_run"] = True; st.session_state["progress"] = 0
     st.session_state["result"] = None; st.session_state["coach_suggestions"] = None
     st.session_state["coach_summary"] = None; st.session_state["screenshots"] = None
-    st.session_state["clips"] = None
+    st.session_state["clips"] = None; st.session_state["analysis_base"] = None
+    st.session_state["event_corrections"] = {}
+    st.session_state["manual_events"] = []
+    st.session_state["correction_revision"] += 1
     with st.spinner(_t("loading")):
         if use_demo: result = _demo_pipeline()
         else:
@@ -524,7 +700,10 @@ if run_clicked:
                 shutil.copyfileobj(uploaded, f, length=8 * 1024 * 1024)
                 video_path = f.name
             try:
-                result = _real_pipeline(video_path, sample_fps, use_yolo=use_yolo)
+                result = _real_pipeline(
+                    video_path, sample_fps, use_yolo=use_yolo,
+                    source_name=uploaded.name,
+                )
                 extractor = OpenCVScreenshotExtractor(max_screenshots=72)
                 analysis = st.session_state.get("analysis_obj")
                 if analysis is not None:
@@ -603,10 +782,11 @@ if result is None:
         st.markdown(f"3. {_t('how_it_works.step3')}"); st.markdown(f"4. {_t('how_it_works.step4')}")
     st.stop()
 
-t1,t2,t3,t4,t5,t6,t7 = st.tabs([
+t1,t2,t3,t4,t5,t6,t7,t8 = st.tabs([
     f"\U0001f4ca {_t('tabs.overview')}", f"\U0001f4c5 {_t('tabs.timeline')}",
     f"\U0001f4dd {_t('tabs.report')}", f"\U0001f517 {_t('tabs.evidence')}",
-    f"\U0001f9e0 {_t('tabs.coach')}", f"\U0001f4f7 {_t('live.title')}", f"\U0001f4c4 {_t('tabs.json')}",
+    f"\U0001f9e0 {_t('tabs.coach')}", f"\U0001f4f7 {_t('live.title')}",
+    f"\U0001f9ea {_t('tabs.diagnostics')}", f"\U0001f4c4 {_t('tabs.json')}",
 ])
 
 # Overview
@@ -755,6 +935,71 @@ with t4:
 # Coach
 with t5:
     st.subheader(f"\U0001f9e0 {_t('coach.title')}"); st.caption(_t("coach.subtitle"))
+    analysis_for_context = st.session_state.get("analysis_obj")
+    if analysis_for_context is not None:
+        coverage = context_coverage(analysis_for_context.round_contexts)
+        with st.expander(_t("context.title"), expanded=False):
+            st.caption(_t("context.subtitle"))
+            context_rows = []
+            for field in (
+                "player_side", "native_round_clock", "weapon", "economy",
+                "utility", "map_position",
+            ):
+                context_rows.append({
+                    _t("context.field"): _t(f"context.fields.{field}"),
+                    _t("context.coverage"): (
+                        f"{coverage[field]} / {coverage['rounds']}"
+                    ),
+                    _t("context.status"): _t(
+                        "context.available" if coverage[field] else
+                        "context.unavailable"
+                    ),
+                })
+            st.dataframe(context_rows, use_container_width=True, hide_index=True)
+            evidence_rows = []
+            for context in analysis_for_context.round_contexts:
+                if (
+                    context.native_round_clock_sec is None
+                    and not context.weapon_categories
+                    and context.money is None
+                    and not context.utility
+                    and context.map_position is None
+                ):
+                    continue
+                minutes = None
+                if context.native_round_clock_sec is not None:
+                    total = int(context.native_round_clock_sec)
+                    minutes = f"{total // 60}:{total % 60:02d}"
+                evidence_rows.append({
+                    _t("context.round"): context.round_id,
+                    _t("context.native_clock_value"): minutes or "—",
+                    _t("context.clock_reads"): len(
+                        context.round_clock_observations
+                    ),
+                    _t("context.weapon_categories"): (
+                        ", ".join(_t(f"context.weapons.{category}")
+                                  for category in context.weapon_categories)
+                        if context.weapon_categories else "—"
+                    ),
+                    _t("context.weapon_reads"): len(context.weapon_observations),
+                    _t("context.money_value"): (
+                        f"${context.money}" if context.money is not None else "—"
+                    ),
+                    _t("context.utility_value"): (
+                        ", ".join(_t(f"context.utilities.{item}")
+                                  for item in context.utility)
+                        if context.utility else "—"
+                    ),
+                    _t("context.map_position_value"): (
+                        f"{_t(f'context.maps.{context.map_name}')} / "
+                        f"{_t(f'context.positions.{context.map_position}')}"
+                        if context.map_name and context.map_position else "—"
+                    ),
+                })
+            if evidence_rows:
+                st.markdown(f"**{_t('context.details')}**")
+                st.dataframe(evidence_rows, use_container_width=True, hide_index=True)
+            st.info(_t("context.abstention"))
     if coach_summary:
         st.subheader(f"\U0001f3c6 {_t('summary_title')}")
         st.markdown(f"**{_t('assessment')}:** {coach_summary.overall_assessment}")
@@ -900,8 +1145,154 @@ with t6:
                             ).analyze(frame, timestamp_sec=img.timestamp_sec)
                             st.rerun()
 
-# JSON
+# Detection diagnostics and correction labels
 with t7:
+    st.subheader(_t("diagnostics.title"))
+    st.caption(_t("diagnostics.subtitle"))
+    base_analysis = st.session_state.get("analysis_base")
+    corrections = st.session_state.get("event_corrections", {})
+    if base_analysis is None:
+        st.info(_t("diagnostics.no_events"))
+    else:
+        metadata = base_analysis.analysis_metadata
+        pipeline_cols = st.columns(4)
+        pipeline_cols[0].metric(
+            _t("diagnostics.base_fps"), metadata.get("base_scan_fps", "-"),
+        )
+        pipeline_cols[1].metric(
+            _t("diagnostics.refine_fps"), metadata.get("requested_fps", "-"),
+        )
+        pipeline_cols[2].metric(
+            _t("diagnostics.windows"),
+            metadata.get("refinement_window_count", 0),
+        )
+        pipeline_cols[3].metric(
+            _t("diagnostics.refined_samples"),
+            metadata.get("refined_sample_count", 0),
+        )
+        augmented_analysis = add_manual_events(
+            base_analysis, st.session_state.get("manual_events", []),
+        )
+        rows = diagnostic_rows(augmented_analysis, corrections)
+        st.markdown(f"### {_t('diagnostics.add_event')}")
+        st.caption(_t("diagnostics.add_event_help"))
+        with st.form("manual_event_form", clear_on_submit=True):
+            add_col1, add_col2, add_col3 = st.columns(3)
+            with add_col1:
+                manual_round_id = st.selectbox(
+                    _t("diagnostics.round"),
+                    [round_.round_id for round_ in base_analysis.rounds],
+                )
+            with add_col2:
+                manual_type = st.selectbox(
+                    _t("diagnostics.event_type"),
+                    [EventType.PLAYER_KILL.value, EventType.PLAYER_DEATH.value],
+                    format_func=lambda value: _t(
+                        f"diagnostics.event_types.{value}"
+                    ),
+                )
+            selected_round = next(
+                round_ for round_ in base_analysis.rounds
+                if round_.round_id == manual_round_id
+            )
+            max_elapsed = max(
+                0.0,
+                (selected_round.end_sec or metadata.get(
+                    "processed_until_sec", selected_round.start_sec + 180.0,
+                )) - selected_round.start_sec,
+            )
+            with add_col3:
+                manual_elapsed = st.number_input(
+                    _t("diagnostics.elapsed"), min_value=0.0,
+                    max_value=float(max(max_elapsed, 0.1)), step=0.1,
+                )
+            add_submitted = st.form_submit_button(
+                _t("diagnostics.add"),
+            )
+        if add_submitted:
+            timestamp = selected_round.start_sec + manual_elapsed
+            event_id = (
+                f"manual_{manual_type}_{manual_round_id}_"
+                f"{int(round(timestamp * 1000)):09d}"
+            )
+            manual_events = st.session_state.get("manual_events", [])
+            if not any(item["event_id"] == event_id for item in manual_events):
+                manual_events.append({
+                    "event_id": event_id,
+                    "round_id": manual_round_id,
+                    "event_type": manual_type,
+                    "timestamp_sec": timestamp,
+                })
+            st.session_state["manual_events"] = manual_events
+            corrected = apply_event_corrections(
+                add_manual_events(base_analysis, manual_events), corrections,
+            )
+            _rebuild_analysis_outputs(corrected)
+            st.rerun()
+        if not rows:
+            st.info(_t("diagnostics.no_events"))
+        else:
+            st.markdown(f"### {_t('diagnostics.events')}")
+            st.caption(_t("diagnostics.events_help"))
+            correction_changed = False
+            revision = st.session_state.get("correction_revision", 0)
+            for row in rows:
+                event_label = _t(
+                    f"diagnostics.event_types.{row['event_type']}"
+                )
+                with st.expander(
+                    f"{row['round_id']} | {event_label} | "
+                    f"t={row['timestamp_sec']:.1f}s | {row['event_id']}",
+                    expanded=False,
+                ):
+                    accepted = st.checkbox(
+                        _t("diagnostics.accepted"),
+                        value=bool(row["accepted"]),
+                        key=f"correction_{revision}_{row['event_id']}",
+                        help=_t("diagnostics.accepted_help"),
+                    )
+                    st.caption(
+                        f"{_t('diagnostics.confidence')}: "
+                        f"{row['confidence']:.2f} | "
+                        f"{_t('diagnostics.method')}: {row['method'] or '-'} | "
+                        f"{_t('diagnostics.source')}: {row['source'] or '-'}"
+                    )
+                    if accepted != bool(row["accepted"]):
+                        corrections[row["event_id"]] = accepted
+                        correction_changed = True
+            if correction_changed:
+                st.session_state["event_corrections"] = corrections
+                _rebuild_analysis_outputs(apply_event_corrections(
+                    augmented_analysis, corrections,
+                ))
+                st.rerun()
+            st.success(_t(
+                "diagnostics.summary",
+                accepted=sum(row["accepted"] for row in diagnostic_rows(
+                    augmented_analysis, corrections,
+                )),
+                total=len(rows),
+            ))
+            if st.button(_t("diagnostics.reset")):
+                st.session_state["event_corrections"] = {}
+                st.session_state["manual_events"] = []
+                st.session_state["correction_revision"] += 1
+                _rebuild_analysis_outputs(base_analysis.model_copy(deep=True))
+                st.rerun()
+            correction_export = build_correction_export(
+                augmented_analysis, corrections,
+            )
+            st.download_button(
+                _t("diagnostics.download"),
+                data=json.dumps(correction_export, indent=2, ensure_ascii=False),
+                file_name=(
+                    f"corrections_{base_analysis.video.video_id}.json"
+                ),
+                mime="application/json",
+            )
+
+# JSON
+with t8:
     st.subheader(_t("json.title"))
     st.download_button(_t("json.download_report"), data=json.dumps(result, indent=2, ensure_ascii=False),
                        file_name=f"report_{result['overview']['video_id']}.json", mime="application/json")

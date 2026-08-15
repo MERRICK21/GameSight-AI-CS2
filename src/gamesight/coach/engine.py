@@ -10,7 +10,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from gamesight.coach.models import CoachCategory, CoachSuggestion, CoachSummary
-from gamesight.domain.models import AnalysisResult, EventType, GameEvent, RoundAnalysis
+from gamesight.domain.models import (
+    AnalysisResult, EventType, GameEvent, RoundAnalysis, RoundContextEvidence,
+)
 from gamesight.i18n.loader import I18nLoader
 from gamesight.reporting.models import EvidenceLink, MatchReport, RoundStats
 
@@ -40,10 +42,14 @@ class RuleBasedCoach(CoachEngine):
         self._counter = 0
         suggestions: list[CoachSuggestion] = []
         for ra, rr in zip(analysis.rounds, report.rounds):
+            context = next((
+                item for item in analysis.round_contexts
+                if item.round_id == ra.round_id
+            ), None)
             # Viewport-backed review remains useful even when native HUD K/D is
             # available.  Native attribution enriches the coach; it must not
             # replace engagement, flash, scope, and death-clip analysis.
-            suggestions.extend(self._analyse_first_person(ra, rr.stats))
+            suggestions.extend(self._analyse_first_person(ra, rr.stats, context))
             if report.overview.personal_combat_available:
                 suggestions.extend(self._analyse_round(ra, rr.stats))
         if not report.overview.personal_combat_available:
@@ -67,7 +73,12 @@ class RuleBasedCoach(CoachEngine):
         result.extend(self._check_combat_density(ra, stats))
         return result
 
-    def _analyse_first_person(self, ra: RoundAnalysis, stats: RoundStats) -> list[CoachSuggestion]:
+    def _analyse_first_person(
+        self,
+        ra: RoundAnalysis,
+        stats: RoundStats,
+        context: RoundContextEvidence | None = None,
+    ) -> list[CoachSuggestion]:
         """Coach only from viewport geometry; never from names or watermarks."""
         result: list[CoachSuggestion] = []
         engagements = [
@@ -96,15 +107,15 @@ class RuleBasedCoach(CoachEngine):
                 CoachCategory.GAME_SENSE,
                 ra.round_id,
                 event.start_sec,
-                self._t.t(
-                    "coach_reasoning.likely_firefight"
-                    if likely_firefight else "coach_reasoning.engagement_window",
-                    time=elapsed,
-                    shots=int(event.attributes.get("shot_candidate_count", 0)),
-                    damage=damage_count,
-                    samples=int(event.attributes.get("visible_sample_count", 1)),
-                    span=float(event.attributes.get("observed_span_sec", 0.0)),
-                ),
+                self._with_context_guard(self._t.t(
+                        "coach_reasoning.likely_firefight"
+                        if likely_firefight else "coach_reasoning.engagement_window",
+                        time=elapsed,
+                        shots=int(event.attributes.get("shot_candidate_count", 0)),
+                        damage=damage_count,
+                        samples=int(event.attributes.get("visible_sample_count", 1)),
+                        span=float(event.attributes.get("observed_span_sec", 0.0)),
+                    ), context),
                 self._t.t(action_key),
                 event.confidence,
                 [self._ev_link(event)],
@@ -113,7 +124,7 @@ class RuleBasedCoach(CoachEngine):
         # an engagement window.  Preserve a neutral, auditable contact card in
         # that case, but do not duplicate the richer engagement suggestions.
         if not engagements:
-            result.extend(self._check_enemy_contact_context(ra, stats))
+            result.extend(self._check_enemy_contact_context(ra, stats, context))
         moments = [
             event for event in ra.events
             if event.event_type == EventType.FIRST_PERSON_MOMENT
@@ -140,8 +151,7 @@ class RuleBasedCoach(CoachEngine):
             death = next((
                 event for event in ra.events
                 if event.event_type == EventType.PLAYER_DEATH
-                and event.attributes.get("method")
-                == "native_health_hud_disappearance"
+                and str(event.attributes.get("method", "")).startswith("native_")
             ), None)
             if death is not None:
                 result.append(self._make(
@@ -182,7 +192,12 @@ class RuleBasedCoach(CoachEngine):
             self._t.t("coach_action.aggressive"), 0.80,
             [self._ev_link(e) for e in kill_events])]
 
-    def _check_enemy_contact_context(self, ra: RoundAnalysis, stats: RoundStats) -> list[CoachSuggestion]:
+    def _check_enemy_contact_context(
+        self,
+        ra: RoundAnalysis,
+        stats: RoundStats,
+        context: RoundContextEvidence | None = None,
+    ) -> list[CoachSuggestion]:
         """Create a review window without inferring pace from contact time.
 
         First-contact time divided by the *observed* round duration is not a
@@ -196,9 +211,42 @@ class RuleBasedCoach(CoachEngine):
         efv_events = [e for e in ra.events if e.event_type == EventType.ENEMY_FIRST_VISIBLE]
         ts = efv_events[0].start_sec if efv_events else stats.enemy_first_visible_sec
         return [self._make(f"contact_context_{ra.round_id}", CoachCategory.GAME_SENSE, ra.round_id, ts,
-            self._t.t("coach_reasoning.contact_context", time=stats.enemy_first_visible_sec),
+            self._with_context_guard(
+                self._t.t(
+                    "coach_reasoning.contact_context",
+                    time=stats.enemy_first_visible_sec,
+                ),
+                context,
+            ),
             self._t.t("coach_action.contact_context"), 0.80,
             [self._ev_link(e) for e in efv_events])]
+
+    def _with_context_guard(
+        self, reasoning: str, context: RoundContextEvidence | None,
+    ) -> str:
+        """State exactly which tactical inputs are known and abstain otherwise."""
+        known: list[str] = []
+        missing: list[str] = []
+        fields = (
+            ("player_side", context.player_side if context else None),
+            ("native_round_clock", context.native_round_clock_sec if context else None),
+            ("weapon", context.weapon if context else None),
+            ("economy", context.money if context else None),
+            ("utility", context.utility if context else None),
+            (
+                "map_position",
+                (
+                    f"{context.map_name}/{context.map_position}"
+                    if context and context.map_name and context.map_position
+                    else None
+                ),
+            ),
+        )
+        for field, value in fields:
+            label = self._t.t(f"context.fields.{field}")
+            (known if value is not None and value != [] else missing).append(label)
+        known_text = ", ".join(known) or self._t.t("common.unavailable")
+        return f"{reasoning} {self._t.t('context.guard', known=known_text, missing=', '.join(missing))}"
 
     def _check_no_combat_round(self, ra: RoundAnalysis, stats: RoundStats) -> list[CoachSuggestion]:
         if stats.kills_detected > 0 or stats.deaths_detected > 0:

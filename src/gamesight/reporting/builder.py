@@ -164,8 +164,7 @@ class EvidenceReportBuilder:
             death_events = [e for e in ra.events if e.event_type == EventType.PLAYER_DEATH]
             evidence = [lk for ev in death_events for lk in self._to_links(ev.evidence)]
             native_status = any(
-                event.attributes.get("method")
-                == "native_health_hud_disappearance"
+                str(event.attributes.get("method", "")).startswith("native_")
                 for event in death_events
             )
             findings.append(self._make_finding(f"{self._PREFIX_COMBAT}_deaths",

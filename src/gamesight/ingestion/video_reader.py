@@ -10,6 +10,7 @@ from importlib import import_module
 from numpy.typing import NDArray
 
 from gamesight.domain.models import VideoInput, VideoMetadata
+from gamesight.orchestration.adaptive import TimeWindow, merge_time_windows
 
 
 class VideoReader(ABC):
@@ -43,6 +44,16 @@ class VideoFrame:
     image: NDArray
 
 
+@dataclass(frozen=True)
+class SamplingDiagnostics:
+    """Outcome of the most recent frame-sampling pass."""
+
+    sampled_frames: int = 0
+    decode_failures: int = 0
+    recoveries: int = 0
+    truncated: bool = False
+
+
 class OpenCVVideoReader(VideoReader):
     """Read video metadata and sample frames via OpenCV.
 
@@ -52,6 +63,11 @@ class OpenCVVideoReader(VideoReader):
 
     def __init__(self, cv2_module: object | None = None) -> None:
         self._cv2 = cv2_module if cv2_module is not None else import_module("cv2")
+        self._last_sampling_diagnostics = SamplingDiagnostics()
+
+    @property
+    def last_sampling_diagnostics(self) -> SamplingDiagnostics:
+        return self._last_sampling_diagnostics
 
     # -- metadata inspection --------------------------------------------------------
 
@@ -129,11 +145,33 @@ class OpenCVVideoReader(VideoReader):
             # compressed codecs.
             target_frame = 0
             current_frame = 0
+            sampled_frames = 0
+            decode_failures = 0
+            recoveries = 0
+            truncated = False
+            consecutive_failures = 0
             while current_frame < total_frames:
                 if current_frame == target_frame:
                     success, image = capture.read()
                     if not success:
-                        break
+                        decode_failures += 1
+                        consecutive_failures += 1
+                        if consecutive_failures >= 3:
+                            truncated = True
+                            break
+                        recovery_frame = current_frame + step
+                        if recovery_frame >= total_frames:
+                            truncated = True
+                            break
+                        capture.set(
+                            self._cv2.CAP_PROP_POS_FRAMES, recovery_frame,
+                        )
+                        recoveries += 1
+                        current_frame = recovery_frame
+                        target_frame = recovery_frame
+                        continue
+                    consecutive_failures = 0
+                    sampled_frames += 1
                     yield VideoFrame(
                         frame_index=current_frame,
                         timestamp_sec=current_frame / native_fps,
@@ -143,10 +181,113 @@ class OpenCVVideoReader(VideoReader):
                     current_frame += 1
                 else:
                     # Skip frame without full decode
-                    capture.grab()
+                    if capture.grab() is False:
+                        decode_failures += 1
                     current_frame += 1
         finally:
             capture.release()
+            self._last_sampling_diagnostics = SamplingDiagnostics(
+                sampled_frames=locals().get("sampled_frames", 0),
+                decode_failures=locals().get("decode_failures", 0),
+                recoveries=locals().get("recoveries", 0),
+                truncated=locals().get("truncated", False),
+            )
+
+    def frames_in_windows(
+        self,
+        video: VideoInput,
+        sample_fps: float,
+        windows: list[TimeWindow],
+    ) -> Iterator[VideoFrame]:
+        """Yield samples only inside candidate windows in one sequential pass.
+
+        Skipped frames use ``grab()`` so the high analysis rate does not decode
+        the quiet parts of a long recording a second time.
+        """
+        if sample_fps <= 0:
+            raise FrameSamplingError(
+                f"sample_fps must be positive, got {sample_fps}"
+            )
+        selected = merge_time_windows(windows)
+        if not selected:
+            return
+        capture = self._cv2.VideoCapture(str(video.path))
+        try:
+            if not capture.isOpened():
+                raise VideoReadError(f"Unable to open video: {video.path}")
+            native_fps = self._positive_float(capture.get(self._cv2.CAP_PROP_FPS))
+            if native_fps is None:
+                raise FrameSamplingError(
+                    "Video FPS is unavailable; cannot compute sample interval"
+                )
+            total_frames = self._positive_int(
+                capture.get(self._cv2.CAP_PROP_FRAME_COUNT)
+            )
+            if total_frames is None or total_frames == 0:
+                return
+            step = max(1, round(native_fps / sample_fps))
+            ranges = [
+                (
+                    max(0, int(window.start_sec * native_fps)),
+                    min(total_frames - 1, int(window.end_sec * native_fps)),
+                )
+                for window in selected
+            ]
+            range_index = 0
+            next_target = ranges[0][0]
+            current_frame = 0
+            sampled_frames = 0
+            decode_failures = 0
+            recoveries = 0
+            truncated = False
+            consecutive_failures = 0
+            while current_frame < total_frames and range_index < len(ranges):
+                start_frame, end_frame = ranges[range_index]
+                if current_frame > end_frame:
+                    range_index += 1
+                    if range_index >= len(ranges):
+                        break
+                    next_target = max(current_frame, ranges[range_index][0])
+                    continue
+                if current_frame == next_target and current_frame >= start_frame:
+                    success, image = capture.read()
+                    if not success:
+                        decode_failures += 1
+                        consecutive_failures += 1
+                        if consecutive_failures >= 3:
+                            truncated = True
+                            break
+                        recovery_frame = current_frame + step
+                        if recovery_frame >= total_frames:
+                            truncated = True
+                            break
+                        capture.set(
+                            self._cv2.CAP_PROP_POS_FRAMES, recovery_frame,
+                        )
+                        recoveries += 1
+                        current_frame = recovery_frame
+                        next_target = recovery_frame
+                        continue
+                    consecutive_failures = 0
+                    sampled_frames += 1
+                    yield VideoFrame(
+                        frame_index=current_frame,
+                        timestamp_sec=current_frame / native_fps,
+                        image=image,
+                    )
+                    next_target += step
+                else:
+                    if capture.grab() is False:
+                        decode_failures += 1
+                current_frame += 1
+        finally:
+            capture.release()
+            self._last_sampling_diagnostics = SamplingDiagnostics(
+                sampled_frames=locals().get("sampled_frames", 0),
+                decode_failures=locals().get("decode_failures", 0),
+                recoveries=locals().get("recoveries", 0),
+                truncated=locals().get("truncated", False),
+            )
 
     # -- helpers -------------------------------------------------------------------
 

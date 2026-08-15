@@ -148,6 +148,42 @@ class RoundAnalysis(BaseModel):
     events: list[GameEvent] = Field(default_factory=list)
 
 
+class ContextObservation(BaseModel):
+    """One timestamped native-HUD or first-person context observation."""
+
+    frame_index: int | None = None
+    timestamp_sec: float
+    value: str | int | float
+    confidence: float = Field(ge=0.0, le=1.0)
+    source: str
+
+
+class RoundContextEvidence(BaseModel):
+    """Only context that is directly supported by native first-person HUD evidence.
+
+    Unknown fields intentionally remain ``None``.  Downstream coaching must not
+    replace them with guesses derived from observed round duration or watermarks.
+    """
+
+    round_id: str
+    player_side: str | None = None
+    player_side_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    native_round_clock_sec: float | None = None
+    round_clock_observations: list[ContextObservation] = Field(default_factory=list)
+    weapon: str | None = None
+    weapon_categories: list[str] = Field(default_factory=list)
+    weapon_observations: list[ContextObservation] = Field(default_factory=list)
+    money: int | None = None
+    money_observations: list[ContextObservation] = Field(default_factory=list)
+    utility: list[str] = Field(default_factory=list)
+    utility_observations: list[ContextObservation] = Field(default_factory=list)
+    map_name: str | None = None
+    map_name_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    map_position: str | None = None
+    position_observations: list[ContextObservation] = Field(default_factory=list)
+    sources: dict[str, str] = Field(default_factory=dict)
+
+
 class AnalysisResult(BaseModel):
     schema_version: str = "1.0"
     video: VideoInput
@@ -155,3 +191,7 @@ class AnalysisResult(BaseModel):
     rounds: list[RoundAnalysis] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     capabilities: dict[str, bool] = Field(default_factory=dict)
+    round_contexts: list[RoundContextEvidence] = Field(default_factory=list)
+    analysis_metadata: dict[str, str | int | float | bool | None] = Field(
+        default_factory=dict
+    )

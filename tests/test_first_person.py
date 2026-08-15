@@ -10,8 +10,14 @@ from gamesight.domain.models import (
 from gamesight.perception.first_person import (
     FirstPersonAnalyzer,
     FirstPersonSample,
+    NormalizedOverlayRegion,
     _native_local_kill_row_fingerprints,
+    _native_player_card_signals,
     build_first_person_summary_events,
+)
+from gamesight.perception.weapon import (
+    FirstPersonUtilityClassifier, FirstPersonWeaponClassifier,
+    WeaponObservation,
 )
 from gamesight.reporting.builder import EvidenceReportBuilder
 
@@ -25,8 +31,88 @@ class FirstPersonAnalyzerTests(unittest.TestCase):
     def test_detects_scope_geometry(self):
         image = np.zeros((180, 320, 3), dtype=np.uint8)
         image[65:115, 125:195] = 100
+        image[164:177, 82:88] = (220, 80, 220)
+        image[164:177, 92:99] = (220, 80, 220)
+        image[164:177, 103:110] = (220, 80, 220)
         sample = FirstPersonAnalyzer().update(image, 1, 1.0)
         self.assertTrue(sample.scoped)
+        self.assertEqual(sample.weapon, "sniper")
+        self.assertGreaterEqual(sample.weapon_confidence, .95)
+
+    def test_missing_equipment_panel_does_not_suppress_primary_weapon(self):
+        image = np.zeros((180, 320, 3), dtype=np.uint8)
+        result = FirstPersonWeaponClassifier().classify(image, scoped=True)
+
+        self.assertEqual(result.category, "sniper")
+
+    def test_equipment_hint_is_auxiliary_and_cannot_create_a_weapon(self):
+        image = np.zeros((180, 320, 3), dtype=np.uint8)
+        hint = WeaponObservation(
+            category="rifle", confidence=.99,
+            source="WeaponUtilityExtractor.active_highlight",
+        )
+
+        self.assertIsNone(
+            FirstPersonWeaponClassifier().classify(
+                image, scoped=False, equipment_hint=hint,
+            )
+        )
+
+    def test_detects_distinctive_held_c4_display_and_keypad(self):
+        image = np.zeros((360, 640, 3), dtype=np.uint8)
+        image[205:208, 320:410] = (0, 180, 0)
+        image[235:238, 320:410] = (0, 180, 0)
+        image[205:238, 320:323] = (0, 180, 0)
+        image[205:238, 407:410] = (0, 180, 0)
+        for y in (275, 294, 313, 332):
+            for x in (340, 365, 390):
+                image[y:y + 8, x:x + 10] = 200
+
+        result = FirstPersonWeaponClassifier().classify(image)
+
+        self.assertEqual(result.category, "c4")
+        self.assertGreaterEqual(result.confidence, .9)
+
+    def test_trained_backend_can_supply_supported_held_category(self):
+        class _Backend:
+            def classify(self, image):
+                return WeaponObservation(
+                    category="rifle", confidence=.91,
+                    source="test.held_view_model",
+                )
+
+        result = FirstPersonWeaponClassifier(_Backend()).classify(
+            np.zeros((180, 320, 3), dtype=np.uint8),
+        )
+
+        self.assertEqual(result.category, "rifle")
+
+    def test_utility_inventory_hint_cannot_create_held_utility(self):
+        hint = WeaponObservation(
+            category="smoke", confidence=.99,
+            source="EquipmentPanel.active_highlight",
+        )
+
+        self.assertIsNone(
+            FirstPersonUtilityClassifier().classify(
+                np.zeros((180, 320, 3), dtype=np.uint8),
+                equipment_hint=hint,
+            )
+        )
+
+    def test_trained_backend_can_supply_held_utility(self):
+        class _Backend:
+            def classify(self, image):
+                return WeaponObservation(
+                    category="flashbang", confidence=.93,
+                    source="test.held_view_model",
+                )
+
+        result = FirstPersonUtilityClassifier(_Backend()).classify(
+            np.zeros((180, 320, 3), dtype=np.uint8),
+        )
+
+        self.assertEqual(result.category, "flashbang")
 
     def test_motion_ignores_bottom_watermark_band(self):
         analyzer = FirstPersonAnalyzer()
@@ -36,6 +122,47 @@ class FirstPersonAnalyzerTests(unittest.TestCase):
         analyzer.update(first, 0, 0.0)
         sample = analyzer.update(second, 30, 1.0)
         self.assertEqual(sample.motion_score, 0.0)
+
+    def test_motion_ignores_center_bottom_keystroke_overlay(self):
+        analyzer = FirstPersonAnalyzer()
+        first = np.zeros((180, 320, 3), dtype=np.uint8)
+        second = first.copy()
+        # Matches a creator input display, not the native CS2 HUD.
+        second[126:152, 112:205] = 255
+
+        analyzer.update(first, 0, 0.0)
+        sample = analyzer.update(second, 30, 1.0)
+
+        self.assertEqual(sample.motion_score, 0.0)
+
+    def test_motion_robustly_rejects_relocated_local_voice_ui(self):
+        analyzer = FirstPersonAnalyzer(motion_overlay_regions=())
+        first = np.zeros((180, 320, 3), dtype=np.uint8)
+        second = first.copy()
+        # A small popup at an arbitrary non-default position changes strongly.
+        second[70:90, 42:70] = 255
+
+        analyzer.update(first, 0, 0.0)
+        sample = analyzer.update(second, 30, 1.0)
+
+        self.assertLess(sample.motion_score or 0.0, .01)
+        self.assertGreater(sample.localized_overlay_score, .5)
+
+    def test_motion_preserves_scene_wide_camera_change(self):
+        analyzer = FirstPersonAnalyzer()
+        first = np.zeros((180, 320, 3), dtype=np.uint8)
+        second = first.copy()
+        second[29:151, 32:288] = 255
+
+        analyzer.update(first, 0, 0.0)
+        sample = analyzer.update(second, 30, 1.0)
+
+        self.assertGreater(sample.motion_score or 0.0, .9)
+        self.assertLess(sample.localized_overlay_score, .1)
+
+    def test_overlay_region_rejects_invalid_coordinates(self):
+        with self.assertRaises(ValueError):
+            NormalizedOverlayRegion(.5, .5, .4, .8)
 
     def test_reads_team_only_from_native_bottom_centre_hud(self):
         terrorist = np.zeros((180, 320, 3), dtype=np.uint8)
@@ -93,6 +220,47 @@ class FirstPersonAnalyzerTests(unittest.TestCase):
         self.assertTrue(sample.health_hud_visible)
         self.assertGreater(sample.health_hud_score, 0.025)
 
+    def test_detects_low_saturation_white_health_digits(self):
+        image = np.zeros((180, 320, 3), dtype=np.uint8)
+        # A supported HUD variant renders the HP digits white after a side or
+        # theme change.  Three glyph-like blocks provide text edge structure.
+        image[164:177, 82:86] = 220
+        image[164:177, 91:96] = 220
+        image[164:177, 102:108] = 220
+
+        sample = FirstPersonAnalyzer().update(image, 1, 1.0)
+
+        self.assertTrue(sample.health_hud_visible)
+
+    def test_bright_flat_patch_is_not_a_health_hud(self):
+        image = np.zeros((180, 320, 3), dtype=np.uint8)
+        image[164:177, 82:108] = 220
+
+        sample = FirstPersonAnalyzer().update(image, 1, 1.0)
+
+        self.assertFalse(sample.health_hud_visible)
+
+    def test_native_selected_player_card_distinguishes_alive_and_dead(self):
+        alive = np.zeros((360, 640, 3), dtype=np.uint8)
+        left_x0, left_x1 = int(640 * .424), int(640 * .471)
+        alive[:int(360 * .18), left_x0:left_x1] = (20, 110, 175)
+        hp_y0, hp_y1 = int(360 * .052), int(360 * .087)
+        alive[hp_y0:hp_y1, left_x0:left_x1] = 15
+        for x in range(left_x0 + 2, left_x1 - 2, 5):
+            alive[hp_y0:hp_y1, x:x + 2] = 240
+
+        left_alive, _right_alive, left_score, _right_score = (
+            _native_player_card_signals(alive)
+        )
+
+        self.assertTrue(left_alive)
+        self.assertGreater(left_score, .1)
+
+        dead = alive.copy()
+        dead[hp_y0:hp_y1, left_x0:left_x1] = (20, 110, 175)
+        left_alive, *_ = _native_player_card_signals(dead)
+        self.assertFalse(left_alive)
+
     def test_blank_health_hud_region_is_not_visible(self):
         sample = FirstPersonAnalyzer().update(
             np.zeros((180, 320, 3), dtype=np.uint8), 1, 1.0,
@@ -143,6 +311,28 @@ class FirstPersonAnalyzerTests(unittest.TestCase):
 
 
 class FirstPersonSummaryTests(unittest.TestCase):
+    def test_mixed_rate_samples_are_weighted_by_time_not_sample_count(self):
+        rounds = [RoundAnalysis(round_id="r1", start_sec=0, end_sec=2)]
+        samples = [
+            FirstPersonSample(0, 0.0, False, False, None),
+            FirstPersonSample(15, 0.5, True, False, .2),
+            FirstPersonSample(18, 0.6, True, False, .2),
+            FirstPersonSample(21, 0.7, False, False, .2),
+            FirstPersonSample(30, 1.0, False, False, .2),
+            FirstPersonSample(45, 1.5, False, False, .2),
+        ]
+
+        events = build_first_person_summary_events(rounds, samples)
+        summary = next(
+            event for event in events
+            if event.event_type == EventType.FIRST_PERSON_SUMMARY
+        )
+
+        self.assertEqual(summary.attributes["flash_count"], 1)
+        self.assertAlmostEqual(
+            summary.attributes["flash_exposure_sec"], 0.2,
+        )
+
     def test_aggregates_round_metrics(self):
         rounds = [RoundAnalysis(round_id="r1", start_sec=0, end_sec=4)]
         samples = [

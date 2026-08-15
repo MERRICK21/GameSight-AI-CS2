@@ -60,6 +60,7 @@ class OCRRoundDetector(EventEngine):
         self._pending_scores: tuple[int, int] = (0, 0)
         self._timer_candidate_count = 0
         self._pending: list[GameEvent] = []
+        self._latest_clock_observation: dict[str, int | float | str] | None = None
 
     @property
     def available(self) -> bool:
@@ -69,6 +70,62 @@ class OCRRoundDetector(EventEngine):
     def awaiting_start(self) -> bool:
         """Whether a confirmed score is waiting for the timer to reappear."""
         return self._awaiting_start
+
+    @property
+    def latest_clock_observation(self) -> dict[str, int | float | str] | None:
+        """The clock value from the most recent actual OCR pass, if any."""
+        return (
+            dict(self._latest_clock_observation)
+            if self._latest_clock_observation is not None else None
+        )
+
+    def read_native_context(
+        self,
+        hud_state: HudState,
+        image: NDArray[np.uint8],
+        *,
+        first_person_active: bool,
+    ) -> tuple[dict[str, int | float | str], ...]:
+        """Sparsely read native money and minimap-location context."""
+        if (
+            not first_person_active
+            or not bool(hud_state.values.get("round_info.timer_visible", False))
+        ):
+            return ()
+        money_crop = self._crop_region(image, "money")
+        minimap_crop = self._crop_region(image, "minimap")
+        observations: list[dict[str, int | float | str]] = []
+        if money_crop is not None:
+            mh, mw = money_crop.shape[:2]
+            money_roi = money_crop[
+                int(mh * .42):int(mh * .96), int(mw * .30):int(mw * .86)
+            ]
+            money, confidence = self._reader.read_money(
+                money_roi, hud_state.timestamp_sec,
+            )
+            if money is not None:
+                observations.append({
+                    "kind": "money", "frame_index": hud_state.frame_index,
+                    "timestamp_sec": hud_state.timestamp_sec, "value": money,
+                    "confidence": confidence,
+                    "source": "OCRRoundDetector.native_money",
+                })
+        if minimap_crop is not None:
+            lh, lw = minimap_crop.shape[:2]
+            location_roi = minimap_crop[
+                int(lh * .58):int(lh * .96), int(lw * .05):int(lw * .90)
+            ]
+            position, confidence = self._reader.read_position(
+                location_roi, hud_state.timestamp_sec,
+            )
+            if position is not None:
+                observations.append({
+                    "kind": "position", "frame_index": hud_state.frame_index,
+                    "timestamp_sec": hud_state.timestamp_sec, "value": position,
+                    "confidence": confidence,
+                    "source": "OCRRoundDetector.native_location_text",
+                })
+        return tuple(observations)
 
     def update(
         self,
@@ -87,6 +144,7 @@ class OCRRoundDetector(EventEngine):
         score_confirmed = False
         ct_score = t_score = 0
         if read_score:
+            self._latest_clock_observation = None
             if image is None:
                 return ()
             # Crop to round_info region so OCR only sees the scores.
@@ -96,6 +154,16 @@ class OCRRoundDetector(EventEngine):
             result = self._reader.read(
                 crop, hud_state.frame_index, hud_state.timestamp_sec,
             )
+            clock_value = result.get("native_round_clock_sec")
+            clock_confidence = float(result.get("clock_confidence", 0.0))
+            if clock_value is not None and clock_confidence >= 0.35:
+                self._latest_clock_observation = {
+                    "frame_index": hud_state.frame_index,
+                    "timestamp_sec": hud_state.timestamp_sec,
+                    "value": int(clock_value),
+                    "confidence": clock_confidence,
+                    "source": "OCRRoundDetector.native_round_clock",
+                }
             ct_score = int(result.get("ct_score", 0))
             t_score = int(result.get("t_score", 0))
             score_total = ct_score + t_score
@@ -201,6 +269,7 @@ class OCRRoundDetector(EventEngine):
         self._awaiting_start = False
         self._pending_scores = (0, 0)
         self._timer_candidate_count = 0
+        self._latest_clock_observation = None
         self._pending.clear()
         return ()
 
@@ -229,3 +298,19 @@ class OCRRoundDetector(EventEngine):
         rw = int(w * 0.36)
         rh = int(h * 0.10)
         return image[y: y + rh, x: x + rw]
+
+    def _crop_region(
+        self, image: NDArray[np.uint8], name: str,
+    ) -> NDArray[np.uint8] | None:
+        if self._profile is None:
+            return None
+        region = self._profile.region(name)
+        if region is None:
+            return None
+        h, w = image.shape[:2]
+        x, y, rw, rh = region.to_pixel(w, h)
+        x = max(0, min(x, w - 1))
+        y = max(0, min(y, h - 1))
+        rw = max(1, min(rw, w - x))
+        rh = max(1, min(rh, h - y))
+        return image[y:y + rh, x:x + rw]

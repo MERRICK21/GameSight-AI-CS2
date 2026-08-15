@@ -1,5 +1,7 @@
 # GameSight AI for CS2
 
+[![Python CI](https://github.com/MERRICK21/GameSight-AI-CS2/actions/workflows/ci.yml/badge.svg)](https://github.com/MERRICK21/GameSight-AI-CS2/actions/workflows/ci.yml)
+
 GameSight AI for CS2 is a modular, evidence-driven system for analysing first-person Counter-Strike 2 gameplay recordings. It is designed to evolve from video ingestion and structured event extraction into a CV-assisted review report.
 
 ## Current status
@@ -10,6 +12,13 @@ an optional CS2 T/CT detector to locate enemy contacts, and produces evidence
 screenshots, short H.264 review clips, reports, and grounded coaching cards.
 Personal K/D remains unavailable unless it can be attributed from native game
 signals; creator watermarks and recording-provider IDs are ignored.
+
+Long recordings use a two-stage path: a complete 2 FPS round/OCR scan is
+followed by high-rate analysis only around candidate combat and visual-effect
+windows. The Diagnostics tab can reject false personal events, add missed
+kills/deaths, rebuild the report immediately, and export correction labels.
+Coaching context is explicit: unsupported clock, weapon, economy, utility,
+map, or position inputs stay unknown and cannot silently become tactical advice.
 
 ## Planned pipeline
 
@@ -47,4 +56,6 @@ The optional enemy-contact feature expects local weights at
   highlighting attributes personal kills without reading player names. Exact
   K/D coaching activates only when both native HUD paths are available.
 - Generated event clips are silent.
-- Map-position, weapon-aware, minimap, and `.dem` analysis are future work.
+- Native round-clock, weapon/economy/utility, map-position, minimap, and `.dem`
+  evidence extraction are future work; context-dependent coaching abstains until
+  those inputs are available.

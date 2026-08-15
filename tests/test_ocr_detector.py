@@ -4,7 +4,10 @@ import numpy as np
 
 from gamesight.domain.models import EventType, HudState
 from gamesight.events.ocr_detector import OCRRoundDetector
-from gamesight.perception.ocr import _parse_score_value
+from gamesight.perception.hud_profiles import CS2_STANDARD_16X9
+from gamesight.perception.ocr import (
+    _parse_money_value, _parse_round_clock_value, _parse_score_value,
+)
 
 
 class _ScoreReader:
@@ -14,8 +17,15 @@ class _ScoreReader:
         self.scores = iter(scores)
 
     def read(self, crop, frame_index, timestamp_sec):
-        ct, t = next(self.scores)
-        return {"ct_score": ct, "t_score": t, "round_number": ct + t + 1}
+        item = next(self.scores)
+        ct, t = item[:2]
+        result = {"ct_score": ct, "t_score": t, "round_number": ct + t + 1}
+        if len(item) > 2:
+            result.update({
+                "native_round_clock_sec": item[2],
+                "clock_confidence": item[3],
+            })
+        return result
 
 
 def _state(ts, timer):
@@ -34,8 +44,68 @@ class ScoreParsingTests(unittest.TestCase):
         self.assertEqual(_parse_score_value(["71"]), 1)
         self.assertEqual(_parse_score_value(["74"]), 4)
 
+    def test_parses_native_round_clock_with_or_without_colon(self):
+        self.assertEqual(_parse_round_clock_value("1:55"), 115)
+        self.assertEqual(_parse_round_clock_value("155"), 115)
+        self.assertEqual(_parse_round_clock_value("1352"), 112)
+
+    def test_rejects_invalid_native_round_clock(self):
+        self.assertIsNone(_parse_round_clock_value("1:75"))
+        self.assertIsNone(_parse_round_clock_value("55"))
+
+    def test_parses_unambiguous_native_money(self):
+        self.assertEqual(_parse_money_value("3350"), 3350)
+        self.assertEqual(_parse_money_value("16000"), 16000)
+
+    def test_rejects_ambiguous_dollar_glyph_and_invalid_money(self):
+        self.assertIsNone(_parse_money_value("5450"))
+        self.assertIsNone(_parse_money_value("175"))
+        self.assertIsNone(_parse_money_value("25000"))
+
 
 class OCRRoundDetectorTests(unittest.TestCase):
+    def test_reads_native_context_only_from_active_first_person_frame(self):
+        class _ContextReader:
+            available = True
+
+            def read_money(self, crop, timestamp_sec):
+                return 2750, .98
+
+            def read_position(self, crop, timestamp_sec):
+                return "Palace Interior", .97
+
+        detector = OCRRoundDetector(profile=CS2_STANDARD_16X9)
+        detector._reader = _ContextReader()
+        image = np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+        observations = detector.read_native_context(
+            _state(22, True), image, first_person_active=True,
+        )
+
+        self.assertEqual([item["kind"] for item in observations], [
+            "money", "position",
+        ])
+        self.assertEqual(observations[0]["value"], 2750)
+        self.assertEqual(
+            detector.read_native_context(
+                _state(22, True), image, first_person_active=False,
+            ),
+            (),
+        )
+
+    def test_exposes_clock_only_from_actual_ocr_read(self):
+        detector = OCRRoundDetector()
+        detector._reader = _ScoreReader([(0, 0, 115, .88)])
+        image = np.zeros((100, 200, 3), dtype=np.uint8)
+
+        detector.update(_state(0, True), image, read_score=True)
+
+        self.assertEqual(detector.latest_clock_observation["value"], 115)
+        self.assertEqual(
+            detector.latest_clock_observation["source"],
+            "OCRRoundDetector.native_round_clock",
+        )
+
     def test_timer_updates_do_not_run_ocr_between_scoreboards(self):
         detector = OCRRoundDetector()
         reader = _ScoreReader([(0, 0)])

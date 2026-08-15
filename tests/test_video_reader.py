@@ -13,6 +13,7 @@ from gamesight.ingestion.video_reader import (
     OpenCVVideoReader,
     VideoReadError,
 )
+from gamesight.orchestration.adaptive import TimeWindow
 
 
 class OpenCVVideoReaderTests(TestCase):
@@ -283,6 +284,31 @@ class FrameSamplingTests(TestCase):
         self.assertEqual(frames[0].frame_index, 0)
         capture.release.assert_called_once()
 
+    def test_frames_recovers_after_one_decode_failure(self) -> None:
+        capture = self._capture_for_sampling(
+            native_fps=30.0, total_frames=30,
+        )
+        image = self._fake_image()
+        capture.read.side_effect = [
+            (True, image),
+            (False, None),
+            (True, image),
+            (True, image),
+            (True, image),
+        ]
+        video = VideoInput(video_id="recover", path=Path("recover.mp4"))
+        reader = OpenCVVideoReader(cv2_module=self._backend(capture))
+
+        frames = list(reader.frames(video, sample_fps=5.0))
+
+        self.assertEqual(
+            [frame.frame_index for frame in frames], [0, 12, 18, 24],
+        )
+        capture.set.assert_called_once_with(1, 12)
+        self.assertEqual(reader.last_sampling_diagnostics.decode_failures, 1)
+        self.assertEqual(reader.last_sampling_diagnostics.recoveries, 1)
+        self.assertFalse(reader.last_sampling_diagnostics.truncated)
+
     def test_frames_image_is_numpy_array(self) -> None:
         """Each yielded frame carries a valid BGR image."""
         capture = self._capture_for_sampling(
@@ -297,3 +323,24 @@ class FrameSamplingTests(TestCase):
             self.assertIsInstance(f.image, np.ndarray)
             self.assertEqual(f.image.shape, (1080, 1920, 3))
             self.assertEqual(f.image.dtype, np.uint8)
+
+    def test_frames_in_windows_decodes_only_selected_ranges(self) -> None:
+        capture = self._capture_for_sampling(
+            native_fps=10.0, total_frames=100
+        )
+        video = VideoInput(video_id="windows", path=Path("windows.mp4"))
+        reader = OpenCVVideoReader(cv2_module=self._backend(capture))
+
+        frames = list(reader.frames_in_windows(
+            video,
+            sample_fps=10.0,
+            windows=[TimeWindow(2.0, 3.0), TimeWindow(7.0, 7.5)],
+        ))
+
+        self.assertEqual(
+            [frame.frame_index for frame in frames],
+            list(range(20, 31)) + list(range(70, 76)),
+        )
+        self.assertEqual(capture.read.call_count, 17)
+        self.assertEqual(capture.grab.call_count, 59)
+        capture.set.assert_not_called()
