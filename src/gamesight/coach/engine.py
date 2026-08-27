@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from gamesight.coach.models import CoachCategory, CoachSuggestion, CoachSummary
+from gamesight.coach.models import (
+    CoachCategory, CoachDiagnostics, CoachRun, CoachSuggestion, CoachSummary,
+)
 from gamesight.domain.models import (
     AnalysisResult, EventType, GameEvent, RoundAnalysis, RoundContextEvidence,
 )
@@ -18,6 +20,15 @@ from gamesight.reporting.models import EvidenceLink, MatchReport, RoundStats
 
 
 class CoachEngine(ABC):
+    def run(self, analysis: AnalysisResult, report: MatchReport) -> CoachRun:
+        """Generate a complete coaching result with a provider-neutral trace."""
+        suggestions = self.generate(analysis, report)
+        return CoachRun(
+            suggestions=suggestions,
+            summary=self.summarize(suggestions, analysis, report),
+            diagnostics=CoachDiagnostics(mode="rules"),
+        )
+
     @abstractmethod
     def generate(self, analysis: AnalysisResult, report: MatchReport) -> list[CoachSuggestion]:
         """Produce per-round coaching suggestions."""

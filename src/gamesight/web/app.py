@@ -5,7 +5,7 @@ Usage: streamlit run src/gamesight/web/app.py
 
 from __future__ import annotations
 
-import io, json, shutil, tempfile, time
+import io, json, os, shutil, tempfile, time
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +13,8 @@ import streamlit as st
 from PIL import Image
 
 from gamesight.coach.engine import RuleBasedCoach
+from gamesight.coach.models import CoachRun
+from gamesight.coach.rag_engine import EvidenceBoundRagCoach
 from gamesight.domain.models import AnalysisResult, EventType, GameEvent, RoundAnalysis, VideoInput
 from gamesight.events.aggregator import aggregate_events
 from gamesight.events.detectors import KillEventDetector, RoundBoundaryDetector
@@ -23,6 +25,22 @@ from gamesight.evidence.extractor import (
     build_round_keyframe_events,
 )
 from gamesight.i18n.loader import I18nLoader
+from gamesight.knowledge.embeddings import (
+    DEFAULT_MULTILINGUAL_MODEL,
+    SentenceTransformerEmbeddingProvider,
+)
+from gamesight.knowledge.indexing import index_documents
+from gamesight.knowledge.dynamic_data import (
+    durable_game_rule_documents,
+    dynamic_game_documents,
+)
+from gamesight.knowledge.loaders import (
+    load_knowledge_bytes,
+    load_knowledge_document,
+)
+from gamesight.knowledge.retriever import KnowledgeRetriever
+from gamesight.knowledge.store import LayeredChromaKnowledgeStore
+from gamesight.llm.client import DeepSeekClient, OllamaClient
 from gamesight.ingestion.video_reader import OpenCVVideoReader
 from gamesight.orchestration.adaptive import (
     build_refinement_windows, merge_samples,
@@ -58,6 +76,7 @@ if "analysis_run" not in st.session_state:
         "analysis_run": False, "result": None, "analysis_obj": None,
         "tracks": None, "progress": 0, "status": "",
         "coach_suggestions": None, "coach_summary": None,
+        "coach_diagnostics": None,
         "screenshots": None, "clips": None, "live_result": None,
         "live_state": None, "locale": "en", "mode": "video",
         "content_locale": None, "debug_screenshots": [],
@@ -74,6 +93,67 @@ SCORE_OCR_INTERVAL_SEC = 2.0  # Score persists throughout freeze time.
 CONTEXT_OCR_INTERVAL_SEC = 8.0  # Money/location text changes more slowly.
 def _loader(): return I18nLoader(st.session_state.get("locale", "en"))
 def _t(key: str, **kwargs) -> str: return _loader().t(key, **kwargs)
+
+
+def _knowledge_citation_text(citation) -> str:
+    layer = _t(f"rag.layers.{citation.layer.value}")
+    strength = _t(f"rag.strengths.{citation.rule_strength.value}")
+    verified = (
+        f" · {_t('rag.version_verified')}: {citation.last_verified}"
+        if citation.version_sensitive and citation.last_verified else ""
+    )
+    return (
+        f"{citation.title} · {citation.heading or '—'} · {layer} · {strength}"
+        f"{verified} · {citation.source_uri} · {citation.score:.2f}"
+    )
+
+
+def _store_coach_run(run: CoachRun) -> None:
+    """Store one atomic coach result so text and diagnostics cannot diverge."""
+    st.session_state["coach_suggestions"] = run.suggestions
+    st.session_state["coach_summary"] = run.summary
+    st.session_state["coach_diagnostics"] = run.diagnostics
+
+
+def _run_rule_coach(analysis: AnalysisResult, report) -> None:
+    _store_coach_run(RuleBasedCoach(_loader()).run(analysis, report))
+
+
+@st.cache_resource(show_spinner=False)
+def _rag_store(model_id: str):
+    """Cache the local embedding model and persistent Chroma connection."""
+    repo_root = Path(__file__).resolve().parents[3]
+    embedder = SentenceTransformerEmbeddingProvider(model_id)
+    return LayeredChromaKnowledgeStore(
+        repo_root / "data" / "knowledge_index", embedder,
+    )
+
+
+def _build_rag_retriever(uploads, model_id: str) -> KnowledgeRetriever:
+    """Index built-in policy plus privacy-safe user uploads."""
+    repo_root = Path(__file__).resolve().parents[3]
+    documents = [load_knowledge_document(
+        repo_root / "docs" / "COACHING_EVIDENCE_POLICY.md",
+        source_uri="repo://docs/COACHING_EVIDENCE_POLICY.md",
+        metadata={
+            "knowledge_layer": "tactical_fundamentals",
+            "rule_strength": "strategic_principle",
+        },
+    ), *durable_game_rule_documents(), *dynamic_game_documents()]
+    local_manual = repo_root / "cs2_basic_rule.docx"
+    if local_manual.is_file():
+        documents.append(load_knowledge_document(
+            local_manual, source_uri="local://cs2_basic_rule.docx",
+            metadata={"knowledge_profile": "cs2_structured_manual"},
+        ))
+    for upload in uploads or []:
+        documents.append(load_knowledge_bytes(
+            upload.getvalue(), upload.name,
+            source_uri=f"upload://{Path(upload.name).name}",
+        ))
+    store = _rag_store(model_id)
+    index_documents(documents, store)
+    return KnowledgeRetriever(store, top_k=4, min_score=0.15)
 
 
 class _CachedHudParser:
@@ -123,12 +203,7 @@ def _refresh_localized_outputs() -> None:
         )
         st.session_state["result"] = report.model_dump(mode="json")
         if complete:
-            coach = RuleBasedCoach(_loader())
-            suggestions = coach.generate(analysis, report)
-            st.session_state["coach_suggestions"] = suggestions
-            st.session_state["coach_summary"] = coach.summarize(
-                suggestions, analysis, report,
-            )
+            _run_rule_coach(analysis, report)
         st.session_state["status"] = _t("run.complete")
 
     for debug_result in st.session_state.get("debug_results", []):
@@ -150,15 +225,11 @@ def _rebuild_analysis_outputs(analysis: AnalysisResult) -> None:
     report = builder.build(analysis, st.session_state.get("tracks"))
     st.session_state["result"] = report.model_dump(mode="json")
     if analysis.capabilities.get("analysis_complete", True):
-        coach = RuleBasedCoach(_loader())
-        suggestions = coach.generate(analysis, report)
-        st.session_state["coach_suggestions"] = suggestions
-        st.session_state["coach_summary"] = coach.summarize(
-            suggestions, analysis, report,
-        )
+        _run_rule_coach(analysis, report)
     else:
         st.session_state["coach_suggestions"] = []
         st.session_state["coach_summary"] = None
+        st.session_state["coach_diagnostics"] = None
     st.session_state["content_locale"] = st.session_state.get("locale", "en")
 
 
@@ -489,17 +560,15 @@ def _real_pipeline(
     st.session_state["event_corrections"] = {}
     st.session_state["manual_events"] = []
     st.session_state["analysis_obj"] = analysis
-    coach = RuleBasedCoach(_loader()); builder = EvidenceReportBuilder(loader=_loader())
+    builder = EvidenceReportBuilder(loader=_loader())
     cr = builder.build(analysis)
     if timed_out or not input_decode_complete:
         # Partial rounds must never feed match-level coaching conclusions.
         st.session_state["coach_suggestions"] = []
         st.session_state["coach_summary"] = None
+        st.session_state["coach_diagnostics"] = None
     else:
-        st.session_state["coach_suggestions"] = coach.generate(analysis, cr)
-        st.session_state["coach_summary"] = coach.summarize(
-            st.session_state["coach_suggestions"], analysis, cr,
-        )
+        _run_rule_coach(analysis, cr)
     st.session_state["progress"] = 100
     elapsed_total = time.time() - t0
     st.session_state["status"] = (
@@ -527,10 +596,9 @@ def _demo_pipeline() -> dict:
     st.session_state["event_corrections"] = {}
     st.session_state["manual_events"] = []
     st.session_state["analysis_obj"] = analysis; st.session_state["tracks"] = tracks
-    coach = RuleBasedCoach(_loader()); builder = EvidenceReportBuilder(loader=_loader())
+    builder = EvidenceReportBuilder(loader=_loader())
     cr = builder.build(analysis, tracks)
-    st.session_state["coach_suggestions"] = coach.generate(analysis, cr)
-    st.session_state["coach_summary"] = coach.summarize(st.session_state["coach_suggestions"], analysis, cr)
+    _run_rule_coach(analysis, cr)
     st.session_state["content_locale"] = st.session_state.get("locale", "en")
     st.session_state["progress"] = 100; st.session_state["status"] = _t("run.complete")
     return cr.model_dump(mode="json")
@@ -575,6 +643,10 @@ def _draw_hud_debug(pil_img, profile) -> Image.Image:
     return img
 
 # Sidebar
+rag_enabled = False
+rag_provider = "deepseek"
+rag_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+rag_uploads = []
 with st.sidebar:
     st.title(f"🎯 {_t('app.title')}"); st.caption(_t("app.subtitle"))
     lang_labels = {"en": "English", "zh-CN": "简体中文"}
@@ -609,6 +681,40 @@ with st.sidebar:
         st.caption(_t("sidebar.ocr_automatic"))
         use_yolo = st.checkbox(_t("sidebar.yolo_label"), value=st.session_state.get("use_yolo", False), help=_t("sidebar.yolo_help"))
         st.session_state["use_yolo"] = use_yolo
+        rag_enabled = st.checkbox(
+            _t("rag.enable"), value=st.session_state.get("rag_enabled", False),
+            help=_t("rag.enable_help"),
+        )
+        st.session_state["rag_enabled"] = rag_enabled
+        if rag_enabled:
+            rag_provider = st.selectbox(
+                _t("rag.provider"), ["deepseek", "ollama"],
+                index=0 if st.session_state.get("rag_provider", "deepseek") == "deepseek" else 1,
+            )
+            st.session_state["rag_provider"] = rag_provider
+            model_default = (
+                os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+                if rag_provider == "deepseek" else
+                os.getenv("OLLAMA_MODEL", "qwen3:8b")
+            )
+            rag_model = st.text_input(
+                _t("rag.model"), value=st.session_state.get(
+                    f"rag_model_{rag_provider}", model_default,
+                ),
+            )
+            st.session_state[f"rag_model_{rag_provider}"] = rag_model
+            rag_uploads = st.file_uploader(
+                _t("rag.knowledge_upload"), type=["md", "txt", "docx"],
+                accept_multiple_files=True, key="rag_knowledge_uploads",
+                help=_t("rag.knowledge_help"),
+            )
+            if rag_provider == "deepseek":
+                st.caption(_t(
+                    "rag.key_ready" if os.getenv("DEEPSEEK_API_KEY") else
+                    "rag.key_missing"
+                ))
+            else:
+                st.caption(_t("rag.ollama_hint"))
         st.divider()
         st.subheader(f"⚙️ {_t('sidebar.settings')}")
         sample_fps = st.slider(_t("sidebar.sample_fps"), 1, 30, 10, help=_t("sidebar.sample_fps_help"))
@@ -622,7 +728,7 @@ with st.sidebar:
             st.session_state["debug_screenshots"] = debug_files
             st.caption(_t("sidebar.debug_loaded", n=len(debug_files)))
     st.divider(); st.caption(
-        f"{_t('app.version')} | {_t('app.test_count', n=500)}"
+        f"{_t('app.version')} | {_t('app.test_count', n=521)}"
     )
 
 if st.session_state.get("mode") == "screenshot":
@@ -686,7 +792,8 @@ with col2:
 if run_clicked:
     st.session_state["analysis_run"] = True; st.session_state["progress"] = 0
     st.session_state["result"] = None; st.session_state["coach_suggestions"] = None
-    st.session_state["coach_summary"] = None; st.session_state["screenshots"] = None
+    st.session_state["coach_summary"] = None; st.session_state["coach_diagnostics"] = None
+    st.session_state["screenshots"] = None
     st.session_state["clips"] = None; st.session_state["analysis_base"] = None
     st.session_state["event_corrections"] = {}
     st.session_state["manual_events"] = []
@@ -772,6 +879,7 @@ if (
 
 result = st.session_state.get("result"); coach_suggestions = st.session_state.get("coach_suggestions")
 coach_summary = st.session_state.get("coach_summary"); screenshots = st.session_state.get("screenshots")
+coach_diagnostics = st.session_state.get("coach_diagnostics")
 clips = st.session_state.get("clips")
 
 if result is None:
@@ -1000,6 +1108,73 @@ with t5:
                 st.markdown(f"**{_t('context.details')}**")
                 st.dataframe(evidence_rows, use_container_width=True, hide_index=True)
             st.info(_t("context.abstention"))
+    if rag_enabled and analysis_for_context is not None:
+        llm_client = (
+            DeepSeekClient(model=rag_model) if rag_provider == "deepseek"
+            else OllamaClient(model=rag_model)
+        )
+        can_generate_rag = (
+            analysis_for_context.capabilities.get("analysis_complete", True)
+            and llm_client.available
+        )
+        if st.button(
+            _t("rag.generate"), type="primary", disabled=not can_generate_rag,
+            help=_t("rag.generate_help"),
+        ):
+            try:
+                with st.spinner(_t("rag.generating")):
+                    retriever = _build_rag_retriever(
+                        rag_uploads, DEFAULT_MULTILINGUAL_MODEL,
+                    )
+                    report_for_rag = EvidenceReportBuilder(loader=_loader()).build(
+                        analysis_for_context, st.session_state.get("tracks"),
+                    )
+                    engine = EvidenceBoundRagCoach(
+                        retriever, llm_client,
+                        base_coach=RuleBasedCoach(_loader()),
+                        locale=st.session_state.get("locale", "en"),
+                    )
+                    _store_coach_run(engine.run(analysis_for_context, report_for_rag))
+                st.rerun()
+            except Exception as exc:
+                st.error(_t(
+                    "rag.generation_failed", error=type(exc).__name__,
+                ))
+        if not can_generate_rag:
+            unavailable_key = (
+                rag_provider == "deepseek" and not llm_client.available
+            )
+            st.info(_t(
+                "rag.unavailable_key" if unavailable_key else
+                "rag.unavailable_analysis"
+            ))
+    if coach_diagnostics:
+        with st.expander(_t("rag.diagnostics"), expanded=False):
+            mode_key = "rag.mode_rag" if coach_diagnostics.mode == "rag_llm" else "rag.mode_rules"
+            st.caption(_t(mode_key))
+            diagnostic_rows = [
+                (_t("rag.provider"), coach_diagnostics.provider or "—"),
+                (_t("rag.model"), coach_diagnostics.model or "—"),
+                (_t("rag.knowledge_chunks"), coach_diagnostics.knowledge_chunks),
+                (_t("rag.knowledge_layers"), " · ".join(
+                    f"{_t(f'rag.layers.{layer}')} {count}"
+                    for layer, count in coach_diagnostics.knowledge_layers.items()
+                ) or "—"),
+                (_t("rag.retrieved_chunks"), coach_diagnostics.retrieved_chunks),
+                (_t("rag.accepted"), coach_diagnostics.accepted_enrichments),
+                (_t("rag.rejected"), coach_diagnostics.rejected_enrichments),
+                (_t("rag.latency"), f"{coach_diagnostics.latency_ms} ms"),
+                (_t("rag.tokens"), coach_diagnostics.total_tokens),
+            ]
+            st.dataframe(
+                [{_t("rag.metric"): name, _t("rag.value"): value}
+                 for name, value in diagnostic_rows],
+                use_container_width=True, hide_index=True,
+            )
+            if coach_diagnostics.fallback_reason:
+                st.warning(_t(
+                    "rag.fallback", reason=coach_diagnostics.fallback_reason,
+                ))
     if coach_summary:
         st.subheader(f"\U0001f3c6 {_t('summary_title')}")
         st.markdown(f"**{_t('assessment')}:** {coach_summary.overall_assessment}")
@@ -1014,6 +1189,10 @@ with t5:
             for item in coach_summary.weaknesses: st.markdown(f"- {item}")
             st.markdown(f"### {_t('practice_drills')}")
             for item in coach_summary.practice_drills: st.markdown(f"- {item}")
+        if coach_summary.knowledge_citations:
+            with st.expander(_t("rag.citations"), expanded=False):
+                for citation in coach_summary.knowledge_citations:
+                    st.caption(_knowledge_citation_text(citation))
         st.divider()
     if not combat_available:
         st.info(_t("coach.first_person_coverage"))
@@ -1082,6 +1261,10 @@ with t5:
                             time=lk.timestamp_sec,
                             source=lk.source,
                         ))
+                if s.knowledge_citations:
+                    with st.expander(_t("rag.citations"), expanded=False):
+                        for citation in s.knowledge_citations:
+                            st.caption(_knowledge_citation_text(citation))
 
 # Live
 with t6:

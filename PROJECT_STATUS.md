@@ -6,6 +6,39 @@
 
 ---
 
+## Latest Improvements (2026-08-27)
+
+### Evidence-constrained RAG + LLM coach
+- **Confirmed architecture implemented**: DeepSeek is the first hosted LLM provider, Ollama is preserved as a functional local adapter, and Agent orchestration remains deliberately out of scope until a later design decision.
+- **Provider-neutral LLM boundary**: typed JSON clients expose availability, provider/model identity, token usage and latency without serializing API keys. DeepSeek uses its OpenAI-compatible Chat Completions endpoint with JSON mode; the key is read only from `DEEPSEEK_API_KEY`.
+- **Multilingual retrieval stack**: `paraphrase-multilingual-MiniLM-L12-v2` supplies normalized Chinese/English embeddings and Chroma stores caller-owned vectors in a persistent local index. A deterministic in-memory store supports fast unit tests.
+- **DOCX/Markdown/text ingestion**: uploaded coaching material is converted into stable, heading-aware chunks with content-derived IDs. Reports expose privacy-safe URIs such as `upload://guide.docx`, never a user machine's absolute path.
+- **Four-layer CS2 knowledge architecture**: the local index is physically separated into `game_rules`, `tactical_fundamentals`, `situation_decisions`, and `dynamic_game_data`. Ordinary-paragraph numbered headings in `cs2_basic_rule.docx` are promoted into semantic sections before chunking; the current manual yields 112 structured chunks rather than one undifferentiated article.
+- **Hard rules are distinct from coaching principles**: every chunk carries `hard_rule`, `strategic_principle`, or `contextual_recommendation`. Hard mechanics may be categorical, while tactical principles must remain qualified and situation advice requires matching observed context. Absolute wording such as “must/never/禁止/必须” is rejected when only soft guidance was cited.
+- **Version-sensitive data registry**: reward/loss-bonus and utility-price facts use stable knowledge IDs, `version_sensitive=true`, verification dates and direct source URLs. Unverified, expired or stale dynamic facts are excluded from retrieval so cached economy numbers cannot silently become permanent rules.
+- **Situation-first retrieval**: a typed `DecisionContext` supports side, alive counts, bomb state, weapon, kit, time, economy, utility and map context while preserving unknowns. Retrieval reserves candidates for `situation_decisions`, so a 1v4 post-plant decision rule is not displaced by generic weapon descriptions.
+- **Decision-quality guardrail**: LLM suggestions must declare `evaluation_basis=decision_quality`; generations that infer a decision was correct merely because a kill, win or successful outcome occurred are rejected. Advice is evaluated from information available at action time, not hindsight.
+- **Explicit two-step RAG**: existing rule suggestions form the evidence query, relevant knowledge passages are retrieved, and the LLM may only enrich supplied suggestion IDs. The LLM does not detect kills, deaths, rounds, enemies or other game events.
+- **Hard evidence gates**: LLM output is schema-validated; citations must be drawn from the retrieved subset; original round, timestamp, category, confidence and video evidence are immutable; unseen numeric claims and unsupported passive/slow/rushed pace verdicts are rejected.
+- **Graceful fallback**: missing keys, incomplete analysis, an empty index, low retrieval scores, request failures, invalid/truncated JSON and rejected claims all retain the deterministic rule-based coach instead of failing the video result.
+- **Auditable web integration**: RAG is opt-in and calls the selected model only after an explicit button click. The UI shows provider/model, four-layer chunk coverage, indexed and retrieved chunks, accepted/rejected enrichments, latency, token use, fallback reason and per-card citations with localized layer/rule-strength/version labels.
+- **Local-first privacy**: the built-in evidence policy is always available, user knowledge and Chroma vectors stay under Git-ignored local paths, and API secrets are not accepted through report fields or written to diagnostics.
+- **Reproducible tooling and evaluation**: `gamesight-knowledge` builds/queries the index from the CLI; a provider-neutral evaluator reports retrieval Recall@K and MRR; fake LLM/embedding tests cover grounding and fallback without network calls.
+- **Environment validation**: the new Python dependencies import successfully and a real local Chroma round trip passes. The first MiniLM artifact download is still pending because the current execution environment returned empty Hugging Face cache files after TLS interception; Windows trust-store support and an isolated `models/huggingface/` cache are in place so the project does not rely on disabling certificate checks or deleting the user's global cache.
+- **Local CS2 manual integrated**: the 20,050-character `cs2_basic_rule.docx` manual is detected automatically when present and indexed together with the repository evidence policy. The third-party/source document and Word lock files remain Git-ignored, while Markdown/text/DOCX uploads can extend the same local index.
+- **Regression status**: compilation and the complete suite pass with **528 tests**. New regressions cover numbered-DOCX semantic separation, four-layer routing, stable dynamic records, situation-first retrieval, soft-rule absolutism, outcome bias and stale-data rejection.
+
+### Resume / interview talking points
+- Designed a production-style **two-step RAG pipeline** that separates deterministic CV/event evidence from probabilistic LLM language generation.
+- Implemented **multilingual semantic retrieval** with MiniLM, persistent Chroma storage, stable chunk identities, citation traceability and offline Recall@K/MRR evaluation.
+- Built a **DeepSeek-first, provider-agnostic LLM layer** with an Ollama adapter, structured-output validation, token/latency telemetry and secret-safe configuration.
+- Added **hallucination controls** that preserve source evidence, reject unknown citations and numeric claims, abstain when tactical context is missing, and automatically fall back to deterministic rules.
+- Built a **policy-aware retrieval layer** that encodes rule strength and temporal validity instead of treating all Markdown passages as equally authoritative.
+- Added **context-aware decision evaluation**: situation retrieval is prioritized and the LLM is prevented from confusing favorable outcomes with sound decisions.
+- Integrated the feature into a bilingual Streamlit product with explicit cost control, local knowledge ingestion, privacy-safe source metadata and user-visible diagnostics.
+
+---
+
 ## Latest Improvements (2026-08-15)
 
 ### `test2` native K/D regression fixed
@@ -267,7 +300,7 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 
 ## Test Summary
 
-**505 passing**, 0 failures.
+**528 passing**, 0 failures.
 
 | Module | Tests |
 |--------|-------|
@@ -305,5 +338,5 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 - [ ] **Clip audio and download controls**: optionally preserve source audio and provide an explicit per-event download action.
 - [ ] **Comparison mode**: compare two matches side by side to track improvement.
 - [ ] **CS2 demo file (.dem) support**: parse demo files directly instead of relying on video recordings.
-- [ ] **LLM narrative report**: swap `RuleBasedCoach` with an LLM-backed engine for more natural, contextual advice.
+- [x] **Optional RAG + LLM narrative coach**: DeepSeek-first/Ollama-compatible enrichment is evidence constrained, citation backed, context gated and falls back to `RuleBasedCoach`.
 - [ ] **Heatmap generation**: death locations, kill locations, movement paths overlaid on map images.

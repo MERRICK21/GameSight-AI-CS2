@@ -43,6 +43,60 @@ map, or position inputs stay unknown and cannot silently become tactical advice.
 The optional enemy-contact feature expects local weights at
 `models/yolov10n_cs2.pt`. See `docs/CS2_ENEMY_MODEL.md` for its constraints.
 
+## Evidence-constrained RAG + LLM coach
+
+The optional coach enrichment path uses multilingual MiniLM embeddings and a
+local persistent Chroma index. DeepSeek is the first supported hosted provider;
+Ollama remains available as a local adapter. The video pipeline and event
+detection stay deterministic, and the API is called only after the user clicks
+the RAG generation button.
+
+Set the DeepSeek key in the process environment before starting Streamlit:
+
+```powershell
+$env:DEEPSEEK_API_KEY="your-key"
+$env:DEEPSEEK_MODEL="deepseek-v4-flash"
+streamlit run src/gamesight/web/app.py
+```
+
+Knowledge files can be uploaded as Markdown, text, or DOCX. The built-in
+coaching evidence policy is always indexed; a local `cs2_basic_rule.docx` is
+also included automatically when present. Uploaded sources, the local manual,
+and Chroma data remain local and are ignored by Git. The first run downloads
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` into
+`models/huggingface/`.
+
+Knowledge is stored in four separate collections:
+
+- `game_rules`: durable mechanics and victory conditions.
+- `tactical_fundamentals`: general principles that retain qualifiers and exceptions.
+- `situation_decisions`: replay decisions such as save, retake, post-plant and low-time states.
+- `dynamic_game_data`: patch-sensitive prices, rewards and economy values with verification metadata.
+
+Numbered sections in ordinary DOCX paragraphs are recognized as headings. Dynamic
+facts without a source URL and current verification date are not used. Retrieval
+reserves space for situation decisions before generic tactical or weapon knowledge.
+
+For Ollama, choose it in the sidebar and make sure the local service is running.
+The model defaults to `qwen3:8b` and can be changed in the UI or with
+`OLLAMA_MODEL`.
+
+The LLM is an evidence-constrained editor rather than an event detector: it may
+rewrite only existing suggestion IDs, must cite retrieved chunks, cannot alter
+timestamps/evidence/confidence, and is rejected if it invents numeric facts or
+context-dependent pace claims. Tactical principles cannot be rewritten as hard
+prohibitions, and a favorable kill/win result cannot prove that the original
+decision was sound. Invalid output automatically falls back to the rule-based
+coach. Provider/model, per-layer retrieval counts, accepted/rejected
+enrichments, latency, token usage, and fallback reason are shown in diagnostics.
+
+The local index is also reproducible from the command line:
+
+```powershell
+gamesight-knowledge build docs/COACHING_EVIDENCE_POLICY.md --reset
+gamesight-knowledge query "闪光弹后如何恢复视野"
+```
+
 ## Design principles
 
 - Keep perception, temporal reasoning, reporting, and UI independently replaceable.
