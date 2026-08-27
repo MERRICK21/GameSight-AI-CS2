@@ -117,6 +117,10 @@ class HPBarExtractor(RegionExtractor):
     _BLUE_WIDE_LOW   = np.array([80, 30, 0], dtype=np.uint8)
     _BLUE_WIDE_HIGH  = np.array([255, 200, 120], dtype=np.uint8)
 
+    def __init__(self, enable_numeric_ocr: bool = False, armour_reader=None) -> None:
+        self._enable_numeric_ocr = enable_numeric_ocr
+        self._armour_reader = armour_reader
+
     def extract(
         self,
         region_image: NDArray[np.uint8],
@@ -125,7 +129,14 @@ class HPBarExtractor(RegionExtractor):
     ) -> dict[str, object]:
         h, w = region_image.shape[:2]
         if h == 0 or w == 0:
-            return {"hp": 0, "hp_low": False, "armour": False, "ammo_visible": False, "ammo_pixels": 0}
+            return {
+                "hp": 0,
+                "hp_low": False,
+                "armour": False,
+                "armour_value": None,
+                "ammo_visible": False,
+                "ammo_pixels": 0,
+            }
 
         hpac_x2 = int(w * self._HPAC_END)
 
@@ -166,6 +177,14 @@ class HPBarExtractor(RegionExtractor):
         armour_white = cv_in_range(armour_slice, _WHITE_TEXT_LOW, _WHITE_TEXT_HIGH)
         armour_white_px = int(np.sum(armour_white > 0))
         armour = armour_px > 15 or armour_white_px > 20
+        armour_value = None
+        if self._enable_numeric_ocr:
+            if self._armour_reader is None:
+                from gamesight.perception.ocr import PlayerStatusValueReader
+                self._armour_reader = PlayerStatusValueReader()
+            armour_value = self._armour_reader.read_armour(region_image)
+            if armour_value is not None:
+                armour = armour_value > 0
 
         # -- Ammo: right 25%, yellow digits -----------------------------------
         ammo_x1 = int(w * self._AMMO_START)
@@ -174,7 +193,14 @@ class HPBarExtractor(RegionExtractor):
         ammo_px = int(np.sum(yellow_mask > 0))
         ammo_visible = ammo_px > _TEXT_PIXEL_THRESHOLD * 2
 
-        return {"hp": hp, "hp_low": hp_low, "armour": armour, "ammo_visible": ammo_visible, "ammo_pixels": ammo_px}
+        return {
+            "hp": hp,
+            "hp_low": hp_low,
+            "armour": armour,
+            "armour_value": armour_value,
+            "ammo_visible": ammo_visible,
+            "ammo_pixels": ammo_px,
+        }
 
 
 # -- kill feed ----------------------------------------------------------------

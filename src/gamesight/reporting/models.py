@@ -2,14 +2,20 @@
 
 Every finding in the report carries explicit evidence links that trace
 back to specific frames, timestamps, and pipeline sources.  This makes
-the report auditable — whether the narrative text comes from an LLM or
+the report auditable 鈥?whether the narrative text comes from an LLM or
 from a deterministic template, every claim has a paper trail.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
+
+try:
+    from enum import StrEnum
+except ImportError:
+    class StrEnum(str, Enum):
+        pass
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -74,6 +80,19 @@ class RoundStats(BaseModel):
     teammate_tracks: int = 0
     enemy_first_visible_sec: float | None = None
     combat_segments: int = 0
+    personal_combat_available: bool = True
+    personal_kills_available: bool = True
+    personal_deaths_available: bool = True
+    flash_count: int = 0
+    flash_exposure_sec: float = 0.0
+    scoped_sec: float = 0.0
+    scoped_ratio: float = 0.0
+    view_motion_avg: float = 0.0
+    stationary_ratio: float = 0.0
+    engagement_windows: int = 0
+    likely_firefights: int = 0
+    shot_candidate_windows: int = 0
+    damage_candidate_windows: int = 0
 
 
 class RoundReport(BaseModel):
@@ -96,12 +115,18 @@ class MatchOverview(BaseModel):
     fps: float | None = None
     resolution: dict[str, int] = Field(default_factory=dict)
     total_rounds: int = 0
+    analysis_complete: bool = True
     total_kills_detected: int = 0
     total_deaths_detected: int = 0
     total_enemy_tracks: int = 0
     total_enemies_encountered: int = 0
     avg_survival_sec: float | None = None
     warnings: list[str] = Field(default_factory=list)
+    personal_combat_available: bool = True
+    personal_kills_available: bool = True
+    personal_deaths_available: bool = True
+    total_engagement_windows: int = 0
+    total_likely_firefights: int = 0
 
 
 class MatchReport(BaseModel):

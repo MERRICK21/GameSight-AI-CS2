@@ -6,11 +6,19 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase
 
+import cv2
 import numpy as np
 
-from gamesight.domain.models import EventType, Evidence, GameEvent
-from gamesight.evidence.models import EvidenceImage
-from gamesight.evidence.extractor import OpenCVScreenshotExtractor
+from gamesight.domain.models import (
+    AnalysisResult, EventType, Evidence, GameEvent, RoundAnalysis,
+    VideoInput, VideoMetadata,
+)
+from gamesight.evidence.models import EvidenceClip, EvidenceImage
+from gamesight.evidence.extractor import (
+    EvidenceClipExtractor,
+    OpenCVScreenshotExtractor,
+    build_round_keyframe_events,
+)
 
 
 class _MockCV2:
@@ -107,6 +115,53 @@ class EvidenceImageModelTests(TestCase):
         self.assertFalse(img.exists())
 
 
+class EvidenceClipTests(TestCase):
+    def test_model_path_and_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clip.mp4"
+            path.write_bytes(b"video")
+            clip = EvidenceClip(
+                clip_id="clip_e1", event_id="e1", trigger_sec=1.0,
+                start_sec=.5, end_sec=1.5, video_path=str(path), source="test",
+            )
+            self.assertEqual(clip.path, path)
+            self.assertTrue(clip.exists())
+
+    def test_extracts_browser_compatible_short_clip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.mp4"
+            writer = cv2.VideoWriter(
+                str(source), cv2.VideoWriter_fourcc(*"mp4v"), 30.0,
+                (320, 180),
+            )
+            self.assertTrue(writer.isOpened())
+            for index in range(60):
+                frame = np.full((180, 320, 3), index * 4, dtype=np.uint8)
+                writer.write(frame)
+            writer.release()
+            event = GameEvent(
+                event_id="engagement_r1_01",
+                event_type=EventType.ENGAGEMENT_CANDIDATE,
+                start_sec=1.0,
+                confidence=.8,
+                evidence=[Evidence(
+                    timestamp_sec=1.0, frame_index=30, source="test",
+                )],
+                attributes={"clip_trigger_sec": 1.0},
+            )
+            clips = EvidenceClipExtractor(
+                before_sec=.5, after_sec=.5, output_fps=15, max_width=160,
+            ).extract(source, [event], root / "clips")
+            self.assertEqual(len(clips), 1)
+            self.assertTrue(clips[0].exists())
+            self.assertEqual((clips[0].width, clips[0].height), (160, 90))
+            capture = cv2.VideoCapture(str(clips[0].path))
+            self.assertTrue(capture.isOpened())
+            self.assertGreaterEqual(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)), 14)
+            capture.release()
+
+
 class ScreenshotExtractorTests(TestCase):
     def setUp(self) -> None:
         self.mock_cv2 = _MockCV2()
@@ -177,3 +232,39 @@ class ScreenshotExtractorTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             images = extractor.extract("bad.mp4", events, Path(tmp))
             self.assertEqual(images, [])
+
+
+class RoundKeyframeEventTests(TestCase):
+
+    def _analysis(self) -> AnalysisResult:
+        return AnalysisResult(
+            video=VideoInput(video_id="v", path=Path("v.mp4")),
+            metadata=VideoMetadata(
+                duration_sec=120.0, fps=30.0, width=1920, height=1080,
+            ),
+            rounds=[
+                RoundAnalysis(round_id="round_001", start_sec=0.0, end_sec=60.0),
+                RoundAnalysis(round_id="round_002", start_sec=60.0, end_sec=120.0),
+            ],
+        )
+
+    def test_builds_two_interior_frames_per_round(self) -> None:
+        events = build_round_keyframe_events(self._analysis())
+        self.assertEqual(len(events), 4)
+        self.assertEqual([round(e.start_sec, 1) for e in events], [20.0, 40.0, 80.0, 100.0])
+        self.assertTrue(all(e.event_type == EventType.KEYFRAME for e in events))
+        self.assertEqual(events[0].evidence[0].frame_index, 600)
+        self.assertEqual(events[2].attributes["round_id"], "round_002")
+
+    def test_respects_limit(self) -> None:
+        events = build_round_keyframe_events(
+            self._analysis(), samples_per_round=3, max_events=3,
+        )
+        self.assertEqual(len(events), 3)
+
+    def test_uses_video_end_for_truncated_round(self) -> None:
+        analysis = self._analysis()
+        analysis.rounds[-1].end_sec = None
+        events = build_round_keyframe_events(analysis, samples_per_round=1)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1].start_sec, 90.0)

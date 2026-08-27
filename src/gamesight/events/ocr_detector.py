@@ -52,15 +52,87 @@ class OCRRoundDetector(EventEngine):
         self._min_duration = min_round_duration_sec
         self._seq_counter = 0       # sequential round counter (1-based)
         self._last_round_num = 0
+        self._last_score_total: int | None = None
+        self._score_candidate: tuple[int, int] | None = None
+        self._score_candidate_count = 0
         self._last_start_ts: float | None = None
+        self._awaiting_start = False
+        self._pending_scores: tuple[int, int] = (0, 0)
+        self._timer_candidate_count = 0
         self._pending: list[GameEvent] = []
+        self._latest_clock_observation: dict[str, int | float | str] | None = None
 
     @property
     def available(self) -> bool:
         return self._reader.available
 
+    @property
+    def awaiting_start(self) -> bool:
+        """Whether a confirmed score is waiting for the timer to reappear."""
+        return self._awaiting_start
+
+    @property
+    def latest_clock_observation(self) -> dict[str, int | float | str] | None:
+        """The clock value from the most recent actual OCR pass, if any."""
+        return (
+            dict(self._latest_clock_observation)
+            if self._latest_clock_observation is not None else None
+        )
+
+    def read_native_context(
+        self,
+        hud_state: HudState,
+        image: NDArray[np.uint8],
+        *,
+        first_person_active: bool,
+    ) -> tuple[dict[str, int | float | str], ...]:
+        """Sparsely read native money and minimap-location context."""
+        if (
+            not first_person_active
+            or not bool(hud_state.values.get("round_info.timer_visible", False))
+        ):
+            return ()
+        money_crop = self._crop_region(image, "money")
+        minimap_crop = self._crop_region(image, "minimap")
+        observations: list[dict[str, int | float | str]] = []
+        if money_crop is not None:
+            mh, mw = money_crop.shape[:2]
+            money_roi = money_crop[
+                int(mh * .42):int(mh * .96), int(mw * .30):int(mw * .86)
+            ]
+            money, confidence = self._reader.read_money(
+                money_roi, hud_state.timestamp_sec,
+            )
+            if money is not None:
+                observations.append({
+                    "kind": "money", "frame_index": hud_state.frame_index,
+                    "timestamp_sec": hud_state.timestamp_sec, "value": money,
+                    "confidence": confidence,
+                    "source": "OCRRoundDetector.native_money",
+                })
+        if minimap_crop is not None:
+            lh, lw = minimap_crop.shape[:2]
+            location_roi = minimap_crop[
+                int(lh * .58):int(lh * .96), int(lw * .05):int(lw * .90)
+            ]
+            position, confidence = self._reader.read_position(
+                location_roi, hud_state.timestamp_sec,
+            )
+            if position is not None:
+                observations.append({
+                    "kind": "position", "frame_index": hud_state.frame_index,
+                    "timestamp_sec": hud_state.timestamp_sec, "value": position,
+                    "confidence": confidence,
+                    "source": "OCRRoundDetector.native_location_text",
+                })
+        return tuple(observations)
+
     def update(
-        self, hud_state: HudState, image: NDArray[np.uint8] | None = None, tracks=()
+        self,
+        hud_state: HudState,
+        image: NDArray[np.uint8] | None = None,
+        tracks=(),
+        read_score: bool = True,
     ) -> Sequence[GameEvent]:
         """Must pass *image* (the full frame).  The detector crops the
         round_info region internally before calling OCR.
@@ -69,21 +141,60 @@ class OCRRoundDetector(EventEngine):
         """
         self._pending.clear()
 
-        if image is None:
-            return ()
+        score_confirmed = False
+        ct_score = t_score = 0
+        if read_score:
+            self._latest_clock_observation = None
+            if image is None:
+                return ()
+            # Crop to round_info region so OCR only sees the scores.
+            crop = self._crop_round_info(image)
+            if crop is None:
+                return ()
+            result = self._reader.read(
+                crop, hud_state.frame_index, hud_state.timestamp_sec,
+            )
+            clock_value = result.get("native_round_clock_sec")
+            clock_confidence = float(result.get("clock_confidence", 0.0))
+            if clock_value is not None and clock_confidence >= 0.35:
+                self._latest_clock_observation = {
+                    "frame_index": hud_state.frame_index,
+                    "timestamp_sec": hud_state.timestamp_sec,
+                    "value": int(clock_value),
+                    "confidence": clock_confidence,
+                    "source": "OCRRoundDetector.native_round_clock",
+                }
+            ct_score = int(result.get("ct_score", 0))
+            t_score = int(result.get("t_score", 0))
+            score_total = ct_score + t_score
+            if score_total < 0 or score_total >= _MAX_ROUND_NUMBER:
+                return ()
 
-        # Crop to round_info region so OCR only sees the scores.
-        crop = self._crop_round_info(image)
-        if crop is None:
-            return ()
+            if self._last_score_total is None:
+                self._last_score_total = score_total
+                score_confirmed = True
+            elif score_total == self._last_score_total + 1:
+                candidate = (ct_score, t_score)
+                if candidate == self._score_candidate:
+                    self._score_candidate_count += 1
+                else:
+                    self._score_candidate = candidate
+                    self._score_candidate_count = 1
+                if self._score_candidate_count >= 2:
+                    self._last_score_total = score_total
+                    self._score_candidate = None
+                    self._score_candidate_count = 0
+                    score_confirmed = True
+            elif score_total == self._last_score_total:
+                self._score_candidate = None
+                self._score_candidate_count = 0
+            else:
+                # A native score can only advance by one.  Ignore OCR jumps,
+                # regressions, portraits, and separator artefacts.
+                self._score_candidate = None
+                self._score_candidate_count = 0
 
-        result = self._reader.read(crop, hud_state.frame_index, hud_state.timestamp_sec)
-        round_num = result.get("round_number", 0)
-
-        # Clamp to plausible CS2 range.
-        round_num = max(1, min(round_num, _MAX_ROUND_NUMBER))
-
-        if round_num > self._last_round_num:
+        if score_confirmed:
             # New round detected via score change.
             if self._last_start_ts is not None:
                 delta = hud_state.timestamp_sec - self._last_start_ts
@@ -103,11 +214,32 @@ class OCRRoundDetector(EventEngine):
                         attributes={"round_id": prev_rid},
                     ))
 
+            self._last_round_num = score_total + 1
+            self._pending_scores = (
+                ct_score, t_score
+            )
+            self._awaiting_start = True
+            self._timer_candidate_count = 0
+
+        # Score changes are visible on the end screen.  Open the next round
+        # only once the native timer is visible again; this avoids creating a
+        # phantom trailing round when the video ends on a final scoreboard.
+        timer_visible = bool(
+            hud_state.values.get("round_info.timer_visible", False)
+        )
+        if self._awaiting_start:
+            if timer_visible:
+                self._timer_candidate_count += 1
+            else:
+                self._timer_candidate_count = 0
+        if self._awaiting_start and self._timer_candidate_count >= 2:
+            ct, t = self._pending_scores
             # Start new round -- use sequential counter, not raw OCR value.
             self._seq_counter += 1
             rid = f"round_{self._seq_counter:03d}"
             self._last_start_ts = hud_state.timestamp_sec
-            self._last_round_num = round_num
+            self._awaiting_start = False
+            self._timer_candidate_count = 0
             self._pending.append(GameEvent(
                 event_id=f"round_start_{rid}",
                 event_type=EventType.ROUND_START,
@@ -120,8 +252,8 @@ class OCRRoundDetector(EventEngine):
                 )],
                 attributes={
                     "round_id": rid,
-                    "ct_score": result.get("ct_score", 0),
-                    "t_score": result.get("t_score", 0),
+                    "ct_score": ct,
+                    "t_score": t,
                 },
             ))
 
@@ -130,7 +262,14 @@ class OCRRoundDetector(EventEngine):
     def finalize(self) -> Sequence[GameEvent]:
         self._seq_counter = 0
         self._last_round_num = 0
+        self._last_score_total = None
+        self._score_candidate = None
+        self._score_candidate_count = 0
         self._last_start_ts = None
+        self._awaiting_start = False
+        self._pending_scores = (0, 0)
+        self._timer_candidate_count = 0
+        self._latest_clock_observation = None
         self._pending.clear()
         return ()
 
@@ -159,3 +298,19 @@ class OCRRoundDetector(EventEngine):
         rw = int(w * 0.36)
         rh = int(h * 0.10)
         return image[y: y + rh, x: x + rw]
+
+    def _crop_region(
+        self, image: NDArray[np.uint8], name: str,
+    ) -> NDArray[np.uint8] | None:
+        if self._profile is None:
+            return None
+        region = self._profile.region(name)
+        if region is None:
+            return None
+        h, w = image.shape[:2]
+        x, y, rw, rh = region.to_pixel(w, h)
+        x = max(0, min(x, w - 1))
+        y = max(0, min(y, h - 1))
+        rw = max(1, min(rw, w - x))
+        rh = max(1, min(rh, h - y))
+        return image[y:y + rh, x:x + rw]

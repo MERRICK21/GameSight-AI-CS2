@@ -312,6 +312,31 @@ class EvidenceReportBuilderCombatTests(TestCase):
         report = self.builder.build(_analysis(rounds=[ra]))
         self.assertEqual(report.rounds[0].stats.combat_segments, 2)
 
+    def test_native_death_available_while_kills_remain_unavailable(self) -> None:
+        death = _event(EventType.PLAYER_DEATH, 25.0)
+        death.attributes["method"] = "native_health_hud_disappearance"
+        round_analysis = RoundAnalysis(
+            round_id="round_001", start_sec=0.0, end_sec=60.0,
+            events=[death],
+        )
+        analysis = _analysis(rounds=[round_analysis])
+        analysis.capabilities = {
+            "personal_combat": False,
+            "personal_kills": False,
+            "personal_deaths": True,
+        }
+        report = self.builder.build(analysis)
+        stats = report.rounds[0].stats
+        self.assertFalse(report.overview.personal_kills_available)
+        self.assertTrue(report.overview.personal_deaths_available)
+        self.assertEqual(report.overview.total_deaths_detected, 1)
+        self.assertTrue(stats.player_died)
+        self.assertEqual(stats.survival_sec, 25.0)
+        self.assertTrue(any(
+            "native health HUD" in finding.text
+            for finding in report.rounds[0].findings
+        ))
+
 
 class EvidenceReportBuilderEnemyVisibleTests(TestCase):
     def setUp(self) -> None:
@@ -343,6 +368,35 @@ class EvidenceReportBuilderEnemyVisibleTests(TestCase):
         )
         report = self.builder.build(_analysis(rounds=[ra]))
         self.assertEqual(report.rounds[0].stats.enemy_first_visible_sec, 8.0)
+
+    def test_enemy_time_is_relative_to_round_and_engagement_is_counted(self) -> None:
+        engagement = _event(EventType.ENGAGEMENT_CANDIDATE, 87.0)
+        engagement.attributes.update({
+            "engagement_level": "likely_firefight",
+            "shot_candidate_count": 2,
+            "damage_candidate_count": 1,
+        })
+        ra = RoundAnalysis(
+            round_id="round_002", start_sec=56.0, end_sec=97.0,
+            events=[
+                _event(EventType.ROUND_START, 56.0),
+                _event(EventType.ENEMY_FIRST_VISIBLE, 87.0),
+                engagement,
+                _event(EventType.ROUND_END, 97.0),
+            ],
+        )
+        report = self.builder.build(_analysis(rounds=[ra]))
+        self.assertEqual(report.rounds[0].stats.enemy_first_visible_sec, 31.0)
+        self.assertEqual(report.rounds[0].stats.engagement_windows, 1)
+        self.assertEqual(report.overview.total_engagement_windows, 1)
+        self.assertEqual(report.rounds[0].stats.likely_firefights, 1)
+        self.assertEqual(report.rounds[0].stats.shot_candidate_windows, 1)
+        self.assertEqual(report.rounds[0].stats.damage_candidate_windows, 1)
+        self.assertEqual(report.overview.total_likely_firefights, 1)
+        self.assertTrue(any(
+            finding.finding_id.startswith("combat_likely_firefight")
+            for finding in report.rounds[0].findings
+        ))
 
 
 class EvidenceReportBuilderTrackTests(TestCase):
@@ -539,6 +593,14 @@ class EvidenceReportBuilderMetadataTests(TestCase):
         self.assertEqual(report.overview.duration_sec, 120.0)
         self.assertEqual(report.overview.fps, 30.0)
         self.assertEqual(report.overview.resolution, {"width": 1920, "height": 1080})
+
+    def test_partial_analysis_flag_reaches_overview(self) -> None:
+        analysis = _analysis()
+        analysis.capabilities["analysis_complete"] = False
+
+        report = self.builder.build(analysis)
+
+        self.assertFalse(report.overview.analysis_complete)
 
     def test_source_name_in_overview(self) -> None:
         analysis = AnalysisResult(

@@ -94,10 +94,12 @@ class RoundBoundaryDetectorInterfaceTests(TestCase):
         self.assertEqual(detector._ratio_key, "round_info.timer_pixel_ratio")
         self.assertEqual(detector._ct_key, "round_info.ct_score_pixels")
         self.assertEqual(detector._t_key, "round_info.t_score_pixels")
-        self.assertEqual(detector._smooth_win, 5)
+        self.assertEqual(detector._smooth_win, 1)
         self.assertEqual(detector._ratio_high, 0.006)
         self.assertEqual(detector._ratio_low, 0.001)
-        self.assertEqual(detector._min_duration, 3.0)
+        self.assertEqual(detector._min_duration, 15.0)
+        self.assertEqual(detector._presence_confirm, 2.0)
+        self.assertEqual(detector._absence_confirm, 2.0)
 
     def test_update_returns_sequence(self) -> None:
         detector = RoundBoundaryDetector()
@@ -188,7 +190,11 @@ class RoundBoundaryDetectorBasicTests(TestCase):
 class RoundBoundaryDetectorMinDurationTests(TestCase):
 
     def test_short_round_suppressed(self) -> None:
-        detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001, min_round_duration_sec=5.0)
+        detector = RoundBoundaryDetector(
+            smooth_window=1, ratio_high=0.003, ratio_low=0.001,
+            min_round_duration_sec=5.0, presence_confirm_sec=0.4,
+            absence_confirm_sec=1.5,
+        )
         events: list = []
         for i in range(5):
             events += detector.update(_ratio_state(i, i * 0.1, 0.01, ct_px=100, t_px=100))
@@ -211,7 +217,11 @@ class RoundBoundaryDetectorMinDurationTests(TestCase):
         self.assertEqual(len(events), 2)
 
     def test_min_duration_zero_allows_all(self) -> None:
-        detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001, min_round_duration_sec=0.0)
+        detector = RoundBoundaryDetector(
+            smooth_window=1, ratio_high=0.003, ratio_low=0.001,
+            min_round_duration_sec=0.0, presence_confirm_sec=0.4,
+            absence_confirm_sec=1.5,
+        )
         events: list = []
         for i in range(5):
             events += detector.update(_ratio_state(i, i * 0.1, 0.01, ct_px=100, t_px=100))
@@ -236,7 +246,10 @@ class RoundBoundaryDetectorSmoothingTests(TestCase):
         self.assertEqual(len(events), 1, "Flicker filtered by smoothing")
 
     def test_sustained_absence_with_score_change_ends_round(self) -> None:
-        detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.003, ratio_low=0.001)
+        detector = RoundBoundaryDetector(
+            smooth_window=1, ratio_high=0.003, ratio_low=0.001,
+            min_round_duration_sec=1.0,
+        )
         events: list = []
         for i in range(5):
             events += detector.update(_ratio_state(i, i * 0.5, 0.01, ct_px=100, t_px=100))
@@ -244,6 +257,51 @@ class RoundBoundaryDetectorSmoothingTests(TestCase):
         for i in range(5, 21):
             events += detector.update(_ratio_state(i, i * 0.5, 0.0, ct_px=200, t_px=150))
         self.assertEqual(len(events), 2)
+
+
+class RoundBoundaryDetectorTimerGapFallbackTests(TestCase):
+
+    def _run_at_fps(self, sample_fps: int) -> list:
+        detector = RoundBoundaryDetector(
+            smooth_window=1,
+            ratio_high=0.003,
+            ratio_low=0.001,
+            min_round_duration_sec=15.0,
+            presence_confirm_sec=2.0,
+            absence_confirm_sec=2.0,
+        )
+        events: list = []
+        fi = 0
+        step = 1.0 / sample_fps
+        # Recognised timer, then a long C4/end gap, then the next timer.
+        # Score-colour pixels remain unavailable throughout.
+        for start, end, ratio in ((0.0, 40.0, 0.01), (40.0, 55.0, 0.0), (55.0, 75.0, 0.01)):
+            ts = start
+            while ts < end:
+                events += detector.update(_ratio_state(fi, ts, ratio, ct_px=20, t_px=0))
+                fi += 1
+                ts += step
+        return events
+
+    def test_custom_hud_without_score_colours_detects_next_round(self) -> None:
+        events = self._run_at_fps(2)
+        self.assertEqual([e.event_type for e in events], [
+            EventType.ROUND_START,
+            EventType.ROUND_END,
+            EventType.ROUND_START,
+        ])
+        self.assertEqual(events[0].attributes["round_id"], "round_001")
+        self.assertEqual(events[2].attributes["round_id"], "round_002")
+        self.assertAlmostEqual(events[1].start_sec, 55.0, places=1)
+        self.assertAlmostEqual(events[2].start_sec, 55.0, places=1)
+
+    def test_boundaries_are_sampling_rate_independent(self) -> None:
+        at_2_fps = self._run_at_fps(2)
+        at_10_fps = self._run_at_fps(10)
+        self.assertEqual(len(at_2_fps), len(at_10_fps))
+        for low_rate, high_rate in zip(at_2_fps, at_10_fps):
+            self.assertEqual(low_rate.event_type, high_rate.event_type)
+            self.assertAlmostEqual(low_rate.start_sec, high_rate.start_sec, places=1)
 
     def test_mid_range_ratio_ignored(self) -> None:
         detector = RoundBoundaryDetector(smooth_window=1, ratio_high=0.005, ratio_low=0.001)
