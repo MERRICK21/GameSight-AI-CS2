@@ -10,9 +10,11 @@ from gamesight.coach.models import (
     KnowledgeCitation,
 )
 from gamesight.coach.rag_engine import EvidenceBoundRagCoach, RagCoachConfig
+from gamesight.coach.agent_engine import AgentCoachConfig, SingleAgentCoach
 
 __all__ = [
     "CoachCategory",
+    "AgentCoachConfig",
     "CoachDiagnostics",
     "CoachEngine",
     "CoachRun",
@@ -22,4 +24,5 @@ __all__ = [
     "KnowledgeCitation",
     "RagCoachConfig",
     "RuleBasedCoach",
+    "SingleAgentCoach",
 ]

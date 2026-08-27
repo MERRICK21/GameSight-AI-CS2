@@ -273,7 +273,7 @@
                  "preview":  "Preview"
              },
     "rag": {
-      "enable": "Enable evidence-constrained RAG + LLM",
+      "enable": "Enable single-Agent tool-using coach",
       "enable_help": "Adds retrieved CS2 knowledge to existing evidence-backed suggestions. Video detection remains unchanged and the API is called only when you click Generate.",
       "provider": "LLM provider",
       "model": "Model",
@@ -282,20 +282,26 @@
       "key_ready": "DeepSeek API key detected from DEEPSEEK_API_KEY.",
       "key_missing": "Set DEEPSEEK_API_KEY before generating. The key is never stored in reports.",
       "ollama_hint": "Ollama must be running locally before generation.",
-      "generate": "Generate RAG + LLM coaching",
+      "generate": "Run single-Agent replay coach",
       "generate_help": "Explicitly calls the selected model. Unsupported claims are rejected and fall back to rule-based text.",
-      "generating": "Indexing knowledge and generating evidence-constrained coaching...",
+      "generating": "The Agent is calling evidence and knowledge tools...",
       "generation_failed": "RAG generation failed ({error}). Rule-based coaching remains available.",
       "unavailable_key": "DeepSeek generation is disabled until DEEPSEEK_API_KEY is configured.",
       "unavailable_analysis": "RAG generation requires a complete video analysis.",
       "diagnostics": "RAG / LLM diagnostics",
       "mode_rules": "Current output: deterministic rule-based coach.",
       "mode_rag": "Current output: evidence-constrained RAG + LLM coach.",
+      "mode_agent": "Current output: single Agent with controlled tool calls.",
       "knowledge_chunks": "Indexed chunks",
       "knowledge_layers": "Four-layer coverage",
       "retrieved_chunks": "Retrieved chunks",
       "accepted": "Accepted enrichments",
       "rejected": "Rejected enrichments",
+      "agent_iterations": "Agent iterations",
+      "agent_tool_calls": "Tool calls",
+      "agent_tool_failures": "Tool failures",
+      "agent_tools": "Tools used",
+      "agent_stop_reason": "Agent stop reason",
       "latency": "LLM latency",
       "tokens": "Total tokens",
       "metric": "Metric",
@@ -315,6 +321,13 @@
         "hard_rule": "Hard rule",
         "strategic_principle": "Strategic principle",
         "contextual_recommendation": "Contextual recommendation"
+      },
+      "tools": {
+        "get_match_overview": "Match overview",
+        "list_coaching_candidates": "Rule candidates",
+        "get_round_evidence": "Round evidence",
+        "get_decision_context": "Decision context",
+        "search_knowledge": "Four-layer knowledge search"
       }
     },
     "coach":  {

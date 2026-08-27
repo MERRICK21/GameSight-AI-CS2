@@ -87,6 +87,11 @@ class CoachDiagnostics(BaseModel):
     retrieved_chunks: int = 0
     accepted_enrichments: int = 0
     rejected_enrichments: int = 0
+    agent_iterations: int = 0
+    agent_tool_calls: int = 0
+    agent_tool_failures: int = 0
+    agent_tools: list[str] = Field(default_factory=list)
+    agent_stop_reason: str | None = None
     latency_ms: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0

@@ -43,13 +43,13 @@ map, or position inputs stay unknown and cannot silently become tactical advice.
 The optional enemy-contact feature expects local weights at
 `models/yolov10n_cs2.pt`. See `docs/CS2_ENEMY_MODEL.md` for its constraints.
 
-## Evidence-constrained RAG + LLM coach
+## Single-Agent, evidence-constrained replay coach
 
 The optional coach enrichment path uses multilingual MiniLM embeddings and a
 local persistent Chroma index. DeepSeek is the first supported hosted provider;
 Ollama remains available as a local adapter. The video pipeline and event
 detection stay deterministic, and the API is called only after the user clicks
-the RAG generation button.
+the Agent generation button.
 
 Set the DeepSeek key in the process environment before starting Streamlit:
 
@@ -90,6 +90,18 @@ decision was sound. Invalid output automatically falls back to the rule-based
 coach. Provider/model, per-layer retrieval counts, accepted/rejected
 enrichments, latency, token usage, and fallback reason are shown in diagnostics.
 
+The LLM now runs as one bounded Replay Coach Agent. It may call only five
+schema-validated, read-only tools: match overview, rule-candidate listing, round
+evidence, decision context and four-layer knowledge search. It has no filesystem,
+shell, network or event-mutation tool. The loop is capped at three iterations and
+twelve tool calls; a final answer without suggestion-bound knowledge retrieval is
+rejected. Agent iterations, tool calls, failures, tool names and stop reason are
+visible in the bilingual diagnostics panel.
+
+See [Project Journey](docs/PROJECT_JOURNEY.md) for the complete engineering and
+interview narrative from Sprint planning and computer vision through RAG/LLM and
+the single-Agent implementation.
+
 The local index is also reproducible from the command line:
 
 ```powershell
@@ -110,6 +122,7 @@ gamesight-knowledge query "闪光弹后如何恢复视野"
   highlighting attributes personal kills without reading player names. Exact
   K/D coaching activates only when both native HUD paths are available.
 - Generated event clips are silent.
-- Native round-clock, weapon/economy/utility, map-position, minimap, and `.dem`
-  evidence extraction are future work; context-dependent coaching abstains until
-  those inputs are available.
+- Native round-clock, side, conservative weapon/economy/utility and selected
+  Mirage-position evidence are supported, but coverage is intentionally sparse.
+  Alive counts, reliable bomb/kit state, full minimap reasoning and `.dem` parsing
+  remain future work; context-dependent coaching abstains until those inputs exist.

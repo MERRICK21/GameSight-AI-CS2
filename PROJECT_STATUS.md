@@ -8,8 +8,12 @@
 
 ## Latest Improvements (2026-08-27)
 
-### Evidence-constrained RAG + LLM coach
-- **Confirmed architecture implemented**: DeepSeek is the first hosted LLM provider, Ollama is preserved as a functional local adapter, and Agent orchestration remains deliberately out of scope until a later design decision.
+### Single-Agent + evidence-constrained RAG/LLM coach
+- **Confirmed architecture implemented**: DeepSeek is the first hosted LLM provider, Ollama is preserved as a functional local adapter, and the coaching workflow now runs through a bounded single Agent. Multi-Agent orchestration remains deliberately out of scope until evaluation demonstrates a need.
+- **Native single-Agent runtime**: implemented without introducing LangChain/LangGraph or a new framework dependency. One provider-neutral JSON model performs up to three iterations and twelve tool calls, with typed turn schemas, unique call IDs, observation-size limits and deterministic failure states.
+- **Five read-only Agent tools**: `get_match_overview`, `list_coaching_candidates`, `get_round_evidence`, `get_decision_context`, and `search_knowledge`. There is intentionally no filesystem, shell, network, event-mutation or report-write tool.
+- **Suggestion-bound tool retrieval**: the Agent must call `search_knowledge` for each suggestion it enriches; retrieved chunks are bound to immutable suggestion IDs and the existing citation allowlist prevents cross-suggestion or unobserved citations.
+- **Agent observability and fallback**: diagnostics expose iterations, tool calls, tool failures, tools used, token/latency totals and stop reason. Invalid turns, duplicate IDs, bad arguments, exhausted budgets, final-without-retrieval and rejected claims all fall back to `RuleBasedCoach` without losing the underlying analysis.
 - **Provider-neutral LLM boundary**: typed JSON clients expose availability, provider/model identity, token usage and latency without serializing API keys. DeepSeek uses its OpenAI-compatible Chat Completions endpoint with JSON mode; the key is read only from `DEEPSEEK_API_KEY`.
 - **Multilingual retrieval stack**: `paraphrase-multilingual-MiniLM-L12-v2` supplies normalized Chinese/English embeddings and Chroma stores caller-owned vectors in a persistent local index. A deterministic in-memory store supports fast unit tests.
 - **DOCX/Markdown/text ingestion**: uploaded coaching material is converted into stable, heading-aware chunks with content-derived IDs. Reports expose privacy-safe URIs such as `upload://guide.docx`, never a user machine's absolute path.
@@ -26,7 +30,7 @@
 - **Reproducible tooling and evaluation**: `gamesight-knowledge` builds/queries the index from the CLI; a provider-neutral evaluator reports retrieval Recall@K and MRR; fake LLM/embedding tests cover grounding and fallback without network calls.
 - **Environment validation**: the new Python dependencies import successfully and a real local Chroma round trip passes. The first MiniLM artifact download is still pending because the current execution environment returned empty Hugging Face cache files after TLS interception; Windows trust-store support and an isolated `models/huggingface/` cache are in place so the project does not rely on disabling certificate checks or deleting the user's global cache.
 - **Local CS2 manual integrated**: the 20,050-character `cs2_basic_rule.docx` manual is detected automatically when present and indexed together with the repository evidence policy. The third-party/source document and Word lock files remain Git-ignored, while Markdown/text/DOCX uploads can extend the same local index.
-- **Regression status**: compilation and the complete suite pass with **528 tests**. New regressions cover numbered-DOCX semantic separation, four-layer routing, stable dynamic records, situation-first retrieval, soft-rule absolutism, outcome bias and stale-data rejection.
+- **Regression status**: compilation and the complete suite pass with **534 tests**. Agent regressions additionally cover valid multi-turn tool use, no-tool final rejection, the fixed permission allowlist, private asset-path redaction, invalid argument handling, untrusted-tool-output prompting and post-Agent outcome-bias rejection.
 
 ### Resume / interview talking points
 - Designed a production-style **two-step RAG pipeline** that separates deterministic CV/event evidence from probabilistic LLM language generation.
@@ -35,7 +39,9 @@
 - Added **hallucination controls** that preserve source evidence, reject unknown citations and numeric claims, abstain when tactical context is missing, and automatically fall back to deterministic rules.
 - Built a **policy-aware retrieval layer** that encodes rule strength and temporal validity instead of treating all Markdown passages as equally authoritative.
 - Added **context-aware decision evaluation**: situation retrieval is prioritized and the LLM is prevented from confusing favorable outcomes with sound decisions.
+- Implemented a **bounded single-Agent control loop** with explicit permissions, tool budgets, state observations, trace telemetry and deterministic fallback—without overstating the project as a multi-Agent system.
 - Integrated the feature into a bilingual Streamlit product with explicit cost control, local knowledge ingestion, privacy-safe source metadata and user-visible diagnostics.
+- Documented the full engineering journey and interview narrative in `docs/PROJECT_JOURNEY.md`, spanning Sprint decomposition, real-video perception, evidence design, RAG/LLM constraints and Agent tool use.
 
 ---
 
@@ -290,7 +296,8 @@ VideoInput -> OpenCVVideoReader -> VideoFrame
     -> EventAggregator -> RoundAnalysis[]
     -> TimelineBuilder -> MatchTimeline -> JSON export
 EvidenceReportBuilder -> MatchReport -> JSON export
-RuleBasedCoach -> CoachSuggestion[] + CoachSummary
+RuleBasedCoach -> immutable coaching candidates
+SingleAgentCoach -> read-only evidence/context/RAG tools -> validated CoachSuggestion[] + CoachSummary
 OpenCVScreenshotExtractor -> EvidenceImage[]
 EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
     -> Streamlit App (i18n EN/ZH, 8 tabs: Overview, Timeline, Report, Evidence, AI Coach, Live, Diagnostics, JSON)
@@ -300,7 +307,7 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 
 ## Test Summary
 
-**528 passing**, 0 failures.
+**534 passing**, 0 failures.
 
 | Module | Tests |
 |--------|-------|
@@ -338,5 +345,5 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 - [ ] **Clip audio and download controls**: optionally preserve source audio and provide an explicit per-event download action.
 - [ ] **Comparison mode**: compare two matches side by side to track improvement.
 - [ ] **CS2 demo file (.dem) support**: parse demo files directly instead of relying on video recordings.
-- [x] **Optional RAG + LLM narrative coach**: DeepSeek-first/Ollama-compatible enrichment is evidence constrained, citation backed, context gated and falls back to `RuleBasedCoach`.
+- [x] **Optional single-Agent narrative coach**: DeepSeek-first/Ollama-compatible tool use is evidence constrained, citation backed, context gated and falls back to `RuleBasedCoach`.
 - [ ] **Heatmap generation**: death locations, kill locations, movement paths overlaid on map images.

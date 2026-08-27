@@ -273,7 +273,7 @@
     "preview": "预览"
   },
   "rag": {
-    "enable": "启用证据约束 RAG + LLM",
+    "enable": "启用单 Agent + 工具调用教练",
     "enable_help": "将检索到的 CS2 知识用于改写已有的证据建议；不会改变视频检测逻辑，只有点击生成按钮才会调用 API。",
     "provider": "LLM 提供方",
     "model": "模型",
@@ -282,20 +282,26 @@
     "key_ready": "已从 DEEPSEEK_API_KEY 检测到 DeepSeek API 密钥。",
     "key_missing": "生成前请设置 DEEPSEEK_API_KEY；密钥不会写入报告。",
     "ollama_hint": "生成前需要在本机启动 Ollama。",
-    "generate": "生成 RAG + LLM 教练建议",
+    "generate": "运行单 Agent 复盘教练",
     "generate_help": "点击后才调用所选模型；无证据支撑的结论会被拒绝并回退到规则文本。",
-    "generating": "正在建立知识索引并生成证据约束教练建议……",
+    "generating": "单 Agent 正在调用证据与知识工具并生成受约束建议……",
     "generation_failed": "RAG 生成失败（{error}），规则教练仍可正常使用。",
     "unavailable_key": "配置 DEEPSEEK_API_KEY 后才能调用 DeepSeek。",
     "unavailable_analysis": "完成整段视频分析后才能生成 RAG 建议。",
     "diagnostics": "RAG / LLM 诊断",
     "mode_rules": "当前输出：确定性规则教练。",
     "mode_rag": "当前输出：证据约束 RAG + LLM 教练。",
+    "mode_agent": "当前输出：单 Agent + 受控工具调用教练。",
     "knowledge_chunks": "已索引分块",
     "knowledge_layers": "四层知识覆盖",
     "retrieved_chunks": "已检索分块",
     "accepted": "通过约束的增强项",
     "rejected": "被约束拒绝的增强项",
+    "agent_iterations": "Agent 迭代次数",
+    "agent_tool_calls": "工具调用次数",
+    "agent_tool_failures": "工具失败次数",
+    "agent_tools": "已调用工具",
+    "agent_stop_reason": "Agent 停止原因",
     "latency": "LLM 延迟",
     "tokens": "Token 总数",
     "metric": "指标",
@@ -315,6 +321,13 @@
       "hard_rule": "硬规则",
       "strategic_principle": "战术原则",
       "contextual_recommendation": "情境建议"
+    },
+    "tools": {
+      "get_match_overview": "比赛概览",
+      "list_coaching_candidates": "规则候选建议",
+      "get_round_evidence": "回合证据",
+      "get_decision_context": "决策上下文",
+      "search_knowledge": "四层知识检索"
     }
   },
   "coach": {

@@ -31,7 +31,7 @@ from gamesight.llm.client import JsonLLMClient, LLMClientError
 from gamesight.reporting.models import MatchReport
 
 
-class _SuggestionDraft(BaseModel):
+class SuggestionDraft(BaseModel):
     source_suggestion_id: str
     reasoning: str = Field(min_length=1, max_length=900)
     action: str = Field(min_length=1, max_length=900)
@@ -39,7 +39,7 @@ class _SuggestionDraft(BaseModel):
     evaluation_basis: Literal["decision_quality"]
 
 
-class _SummaryDraft(BaseModel):
+class SummaryDraft(BaseModel):
     strengths: list[str] = Field(default_factory=list, max_length=6)
     weaknesses: list[str] = Field(default_factory=list, max_length=6)
     practice_drills: list[str] = Field(default_factory=list, max_length=6)
@@ -48,9 +48,9 @@ class _SummaryDraft(BaseModel):
     knowledge_chunk_ids: list[str] = Field(default_factory=list, max_length=10)
 
 
-class _CoachPayload(BaseModel):
-    suggestions: list[_SuggestionDraft] = Field(default_factory=list, max_length=16)
-    summary: _SummaryDraft
+class CoachPayload(BaseModel):
+    suggestions: list[SuggestionDraft] = Field(default_factory=list, max_length=16)
+    summary: SummaryDraft
 
 
 @dataclass(frozen=True)
@@ -151,16 +151,44 @@ class EvidenceBoundRagCoach(CoachEngine):
         )
         try:
             generated = self.llm.generate_json(system_prompt, user_prompt)
-            payload = _CoachPayload.model_validate(generated.content)
+            payload = CoachPayload.model_validate(generated.content)
         except (LLMClientError, ValidationError, ValueError) as exc:
             diagnostics.fallback_reason = f"invalid_llm_output:{type(exc).__name__}"
             return base_run.model_copy(update={"diagnostics": diagnostics})
 
-        diagnostics.mode = "rag_llm"
-        diagnostics.latency_ms = generated.latency_ms
-        diagnostics.prompt_tokens = generated.usage.prompt_tokens
-        diagnostics.completion_tokens = generated.usage.completion_tokens
-        diagnostics.total_tokens = generated.usage.total_tokens
+        return self._apply_payload(
+            payload=payload,
+            generated=generated,
+            base_run=base_run,
+            report=report,
+            analysis=analysis,
+            retrieved_by_suggestion=retrieved_by_suggestion,
+            knowledge=knowledge,
+            diagnostics=diagnostics,
+            mode="rag_llm",
+            generated_by_suffix="rag",
+        )
+
+    def _apply_payload(
+        self,
+        *,
+        payload: CoachPayload,
+        generated,
+        base_run: CoachRun,
+        report: MatchReport,
+        analysis: AnalysisResult,
+        retrieved_by_suggestion: dict[str, list[RetrievedKnowledge]],
+        knowledge: list[RetrievedKnowledge],
+        diagnostics: CoachDiagnostics,
+        mode: str,
+        generated_by_suffix: str,
+    ) -> CoachRun:
+        """Apply the same evidence gates to RAG and tool-using Agent output."""
+        diagnostics.mode = mode
+        diagnostics.latency_ms += generated.latency_ms
+        diagnostics.prompt_tokens += generated.usage.prompt_tokens
+        diagnostics.completion_tokens += generated.usage.completion_tokens
+        diagnostics.total_tokens += generated.usage.total_tokens
         available_chunks = {item.chunk.chunk_id: item for item in knowledge}
         base_by_id = {item.suggestion_id: item for item in base_run.suggestions}
         replacements: dict[str, CoachSuggestion] = {}
@@ -200,7 +228,7 @@ class EvidenceBoundRagCoach(CoachEngine):
             replacements[base.suggestion_id] = base.model_copy(update={
                 "reasoning": draft.reasoning.strip(),
                 "action": draft.action.strip(),
-                "generated_by": f"{generated.provider}_rag",
+                "generated_by": f"{generated.provider}_{generated_by_suffix}",
                 "knowledge_citations": [
                     self._citation(allowed_hits[chunk_id]) for chunk_id in cited_ids
                 ],
@@ -242,7 +270,7 @@ class EvidenceBoundRagCoach(CoachEngine):
                 practice_drills=payload.summary.practice_drills,
                 focus_areas=payload.summary.focus_areas,
                 overall_assessment=payload.summary.overall_assessment,
-                generated_by=f"{generated.provider}_rag",
+                generated_by=f"{generated.provider}_{generated_by_suffix}",
                 knowledge_citations=[
                     self._citation(available_chunks[chunk_id]) for chunk_id in summary_ids
                 ],

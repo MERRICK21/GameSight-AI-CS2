@@ -14,7 +14,7 @@ from PIL import Image
 
 from gamesight.coach.engine import RuleBasedCoach
 from gamesight.coach.models import CoachRun
-from gamesight.coach.rag_engine import EvidenceBoundRagCoach
+from gamesight.coach.agent_engine import SingleAgentCoach
 from gamesight.domain.models import AnalysisResult, EventType, GameEvent, RoundAnalysis, VideoInput
 from gamesight.events.aggregator import aggregate_events
 from gamesight.events.detectors import KillEventDetector, RoundBoundaryDetector
@@ -1129,7 +1129,7 @@ with t5:
                     report_for_rag = EvidenceReportBuilder(loader=_loader()).build(
                         analysis_for_context, st.session_state.get("tracks"),
                     )
-                    engine = EvidenceBoundRagCoach(
+                    engine = SingleAgentCoach(
                         retriever, llm_client,
                         base_coach=RuleBasedCoach(_loader()),
                         locale=st.session_state.get("locale", "en"),
@@ -1150,7 +1150,11 @@ with t5:
             ))
     if coach_diagnostics:
         with st.expander(_t("rag.diagnostics"), expanded=False):
-            mode_key = "rag.mode_rag" if coach_diagnostics.mode == "rag_llm" else "rag.mode_rules"
+            mode_key = (
+                "rag.mode_agent" if coach_diagnostics.mode == "agent_llm"
+                else "rag.mode_rag" if coach_diagnostics.mode == "rag_llm"
+                else "rag.mode_rules"
+            )
             st.caption(_t(mode_key))
             diagnostic_rows = [
                 (_t("rag.provider"), coach_diagnostics.provider or "—"),
@@ -1163,6 +1167,13 @@ with t5:
                 (_t("rag.retrieved_chunks"), coach_diagnostics.retrieved_chunks),
                 (_t("rag.accepted"), coach_diagnostics.accepted_enrichments),
                 (_t("rag.rejected"), coach_diagnostics.rejected_enrichments),
+                (_t("rag.agent_iterations"), coach_diagnostics.agent_iterations),
+                (_t("rag.agent_tool_calls"), coach_diagnostics.agent_tool_calls),
+                (_t("rag.agent_tool_failures"), coach_diagnostics.agent_tool_failures),
+                (_t("rag.agent_tools"), " · ".join(
+                    _t(f"rag.tools.{name}") for name in coach_diagnostics.agent_tools
+                ) or "—"),
+                (_t("rag.agent_stop_reason"), coach_diagnostics.agent_stop_reason or "—"),
                 (_t("rag.latency"), f"{coach_diagnostics.latency_ms} ms"),
                 (_t("rag.tokens"), coach_diagnostics.total_tokens),
             ]
