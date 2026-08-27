@@ -98,9 +98,10 @@ twelve tool calls; a final answer without suggestion-bound knowledge retrieval i
 rejected. Agent iterations, tool calls, failures, tool names and stop reason are
 visible in the bilingual diagnostics panel.
 
-See [Project Journey](docs/PROJECT_JOURNEY.md) for the complete engineering and
-interview narrative from Sprint planning and computer vision through RAG/LLM and
-the single-Agent implementation.
+See [Project Journey](docs/PROJECT_JOURNEY.md) or the
+[Chinese project journey](docs/PROJECT_JOURNEY_ZH.md) for the complete engineering
+and interview narrative from Sprint planning and computer vision through RAG/LLM
+and the single-Agent implementation.
 
 The local index is also reproducible from the command line:
 

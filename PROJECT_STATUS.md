@@ -41,7 +41,7 @@
 - Added **context-aware decision evaluation**: situation retrieval is prioritized and the LLM is prevented from confusing favorable outcomes with sound decisions.
 - Implemented a **bounded single-Agent control loop** with explicit permissions, tool budgets, state observations, trace telemetry and deterministic fallback—without overstating the project as a multi-Agent system.
 - Integrated the feature into a bilingual Streamlit product with explicit cost control, local knowledge ingestion, privacy-safe source metadata and user-visible diagnostics.
-- Documented the full engineering journey and interview narrative in `docs/PROJECT_JOURNEY.md`, spanning Sprint decomposition, real-video perception, evidence design, RAG/LLM constraints and Agent tool use.
+- Documented the full engineering journey and interview narrative in English and Chinese (`docs/PROJECT_JOURNEY.md` and `docs/PROJECT_JOURNEY_ZH.md`), spanning Sprint decomposition, real-video perception, evidence design, RAG/LLM constraints and Agent tool use.
 
 ---
 
