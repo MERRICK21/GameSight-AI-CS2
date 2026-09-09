@@ -13,7 +13,7 @@ CS2_16X9_REGIONS: list[HudRegion] = [
               x_norm=0.000, y_norm=0.000, w_norm=0.257, h_norm=0.343,
               description="Radar mini-map in the top-left corner"),
     HudRegion(name="round_info", anchor="top_center",
-              x_norm=0.473, y_norm=0.003, w_norm=0.054, h_norm=0.078,
+              x_norm=0.455, y_norm=0.003, w_norm=0.090, h_norm=0.090,
               description="Round timer, team scores at top-centre"),
     HudRegion(name="kill_feed", anchor="top_right",
               x_norm=0.785, y_norm=0.003, w_norm=0.212, h_norm=0.250,

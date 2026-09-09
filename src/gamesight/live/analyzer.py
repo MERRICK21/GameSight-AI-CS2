@@ -45,7 +45,11 @@ class LiveAnalyzer:
         t = self._t
 
         hp = self._get_num(values, "player_status.hp", 100)
-        armour = self._get_num(values, "player_status.armour", 100)
+        # ``player_status.armour`` is a presence boolean, not a point value.
+        # Treating it as a number turns False/True into 0/1 in Python and made
+        # every screenshot look like low armour.  Only numeric OCR may drive a
+        # low-armour recommendation; unknown armour stays unknown.
+        armour = self._get_optional_num(values, "player_status.armour_value")
         crosshair_visible = bool(values.get("crosshair.crosshair_visible", True))
         round_active = bool(values.get("round_info.round_active", True))
         kill_feed_active = bool(values.get("kill_feed.kill_feed_active", False))
@@ -69,8 +73,8 @@ class LiveAnalyzer:
         else:
             status_parts.append(t.t("live_advice.hp_healthy", hp=hp))
 
-        if armour < 30 and hp > 50:
-            tips.append(t.t("live_advice.tip_armour_low"))
+        if armour is not None and armour < 60 and hp > 50:
+            tips.append(t.t("live_advice.tip_armour_low", armour=armour))
 
         # Round state
         if round_active:
@@ -97,7 +101,11 @@ class LiveAnalyzer:
 
         # Build result
         status = " | ".join(status_parts) if status_parts else "Analyzing frame..."
-        action = " | ".join(action_parts) if action_parts else "Continue holding your current position"
+        action = (
+            " | ".join(action_parts)
+            if action_parts
+            else t.t("live_advice.action_context_required")
+        )
         tips = tips or [t.t("live_advice.tip_default")]
 
         confidence = 0.7 if len(status_parts) >= 2 else 0.5
@@ -106,6 +114,13 @@ class LiveAnalyzer:
     @staticmethod
     def _get_num(values: dict, key: str, default: float) -> float:
         val = values.get(key)
-        if isinstance(val, (int, float)):
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
             return float(val)
         return default
+
+    @staticmethod
+    def _get_optional_num(values: dict, key: str) -> float | None:
+        val = values.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return float(val)
+        return None

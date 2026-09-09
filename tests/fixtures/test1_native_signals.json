@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "description": "Anonymized signal-level regression fixture derived from the supplied 18-round POV recording; it contains no video frames, names, or watermark data.",
+  "expected": {
+    "rounds": 18,
+    "kills": 20,
+    "deaths": 10,
+    "required_kill_rounds": ["round_011", "round_018"],
+    "open_final_round": "round_018",
+    "rejected_outline_artifacts": 6
+  },
+  "rounds": [
+    {"round_id": "round_001", "kills": 1, "died": false},
+    {"round_id": "round_002", "kills": 1, "died": true},
+    {"round_id": "round_003", "kills": 0, "died": false},
+    {"round_id": "round_004", "kills": 1, "died": false},
+    {"round_id": "round_005", "kills": 1, "died": true},
+    {"round_id": "round_006", "kills": 0, "died": true},
+    {"round_id": "round_007", "kills": 2, "died": false},
+    {"round_id": "round_008", "kills": 2, "died": false},
+    {"round_id": "round_009", "kills": 3, "died": true},
+    {"round_id": "round_010", "kills": 1, "died": true},
+    {"round_id": "round_011", "kills": 1, "died": true},
+    {"round_id": "round_012", "kills": 0, "died": true},
+    {"round_id": "round_013", "kills": 1, "died": false},
+    {"round_id": "round_014", "kills": 1, "died": true},
+    {"round_id": "round_015", "kills": 1, "died": false},
+    {"round_id": "round_016", "kills": 2, "died": true},
+    {"round_id": "round_017", "kills": 1, "died": true},
+    {"round_id": "round_018", "kills": 1, "died": false}
+  ],
+  "sampling_profiles": {
+    "fps_10": {
+      "sample_step_sec": 0.1,
+      "sparse_strong_rounds": []
+    },
+    "fps_2": {
+      "sample_step_sec": 0.5,
+      "sparse_strong_rounds": ["round_011", "round_018"]
+    }
+  },
+  "outline_artifacts": [
+    {"round_id": "round_001", "offset_sec": 48.0, "score": 0.55},
+    {"round_id": "round_010", "offset_sec": 48.0, "score": 0.55},
+    {"round_id": "round_013", "offset_sec": 48.0, "score": 0.912},
+    {"round_id": "round_015", "offset_sec": 48.0, "score": 0.875},
+    {"round_id": "round_017", "offset_sec": 48.0, "score": 0.912},
+    {"round_id": "round_018", "offset_sec": 48.0, "score": 0.912}
+  ]
+}

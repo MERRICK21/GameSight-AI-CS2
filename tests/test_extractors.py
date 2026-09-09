@@ -125,6 +125,17 @@ class HPBarExtractorTests(TestCase):
         result = self.extractor.extract(img, 0, 0.0)
         self.assertFalse(result["armour"])
 
+    def test_numeric_armour_ocr_overrides_presence_heuristic(self) -> None:
+        class _Reader:
+            def read_armour(self, _image):
+                return 100
+
+        extractor = HPBarExtractor(enable_numeric_ocr=True, armour_reader=_Reader())
+        img = np.zeros((110, 420, 3), dtype=np.uint8)
+        result = extractor.extract(img, 0, 0.0)
+        self.assertEqual(result["armour_value"], 100)
+        self.assertTrue(result["armour"])
+
     def test_hp_clamped_to_100(self) -> None:
         img = np.zeros((110, 420, 3), dtype=np.uint8)
         green = (50, 220, 50)

@@ -1,0 +1,285 @@
+{
+  "schema_version": "1.0",
+  "name": "GameSight Replay Coach Agent v1",
+  "description": "Deterministic contracts for tool use, fallback, grounding and safety.",
+  "cases": [
+    {
+      "case_id": "happy_path_full_tool_chain",
+      "description": "Inspect candidate, evidence and context before grounded completion.",
+      "tags": ["happy_path", "tools", "grounding"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "c1", "tool_name": "list_coaching_candidates", "arguments": {}},
+          {"call_id": "c2", "tool_name": "get_round_evidence", "arguments": {"round_id": "round_001"}},
+          {"call_id": "c3", "tool_name": "get_decision_context", "arguments": {"round_id": "round_001"}}
+        ], "final": null}},
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "c4", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "first contact cover decision quality", "top_k": 2}}
+        ], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["list_coaching_candidates", "get_round_evidence", "get_decision_context", "search_knowledge"], "allowed_tools": ["list_coaching_candidates", "get_round_evidence", "get_decision_context", "search_knowledge"], "min_tool_calls": 4, "max_tool_calls": 4, "expected_tool_failures": 0, "expected_invalid_arguments": 0, "min_accepted_enrichments": 1, "require_agent_citations": true}
+    },
+    {
+      "case_id": "minimal_grounded_completion",
+      "description": "Use the minimum required suggestion-bound knowledge call.",
+      "tags": ["happy_path", "grounding"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact review evidence", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "expected_tool_failures": 0, "min_accepted_enrichments": 1, "require_agent_citations": true}
+    },
+    {
+      "case_id": "invalid_arguments_then_recover",
+      "description": "Recover from a schema-invalid tool argument without losing grounding.",
+      "tags": ["tools", "recovery"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "bad", "tool_name": "get_match_overview", "arguments": {"unexpected": true}},
+          {"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact decision evidence", "top_k": 1}}
+        ], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["get_match_overview", "search_knowledge"], "allowed_tools": ["get_match_overview", "search_knowledge"], "min_tool_calls": 2, "max_tool_calls": 2, "expected_tool_failures": 1, "expected_invalid_arguments": 1, "min_accepted_enrichments": 1, "require_agent_citations": true}
+    },
+    {
+      "case_id": "unknown_round_then_recover",
+      "description": "Recover from a validly shaped lookup for an unknown round.",
+      "tags": ["tools", "recovery"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "missing", "tool_name": "get_round_evidence", "arguments": {"round_id": "round_999"}},
+          {"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact decision evidence", "top_k": 1}}
+        ], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["get_round_evidence", "search_knowledge"], "allowed_tools": ["get_round_evidence", "search_knowledge"], "min_tool_calls": 2, "max_tool_calls": 2, "expected_tool_failures": 1, "expected_invalid_arguments": 0, "min_accepted_enrichments": 1, "require_agent_citations": true}
+    },
+    {
+      "case_id": "final_without_knowledge_blocked",
+      "description": "Reject a direct final answer that skipped knowledge retrieval.",
+      "tags": ["guardrail", "grounding", "fallback"],
+      "scenario": {},
+      "script": [{"kind": "final", "variant": "valid"}],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:final_without_knowledge_tool", "expected_stop_reason": "final_without_knowledge_tool", "min_tool_calls": 0, "max_tool_calls": 0, "expected_tool_failures": 0}
+    },
+    {
+      "case_id": "duplicate_call_id_blocked",
+      "description": "A duplicate ID cannot smuggle in the required knowledge call.",
+      "tags": ["guardrail", "tools", "fallback"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "same", "tool_name": "get_match_overview", "arguments": {}},
+          {"call_id": "same", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact evidence", "top_k": 1}}
+        ], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:final_without_knowledge_tool", "expected_stop_reason": "final_without_knowledge_tool", "required_tools": ["get_match_overview"], "allowed_tools": ["get_match_overview"], "min_tool_calls": 2, "max_tool_calls": 2, "expected_tool_failures": 1}
+    },
+    {
+      "case_id": "unknown_suggestion_search_blocked",
+      "description": "Knowledge cannot be attached to an ineligible suggestion ID.",
+      "tags": ["guardrail", "grounding", "fallback"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "unknown", "query": "contact evidence", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:final_without_knowledge_tool", "expected_stop_reason": "final_without_knowledge_tool", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "expected_tool_failures": 1, "expected_invalid_arguments": 0}
+    },
+    {
+      "case_id": "unlisted_tool_rejected",
+      "description": "Reject a turn requesting a tool outside the typed allowlist.",
+      "tags": ["guardrail", "permissions", "fallback"],
+      "scenario": {},
+      "script": [{"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "x", "tool_name": "shell", "arguments": {}}], "final": null}}],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:invalid_agent_turn:ValidationError", "expected_stop_reason": "invalid_agent_turn:ValidationError", "min_tool_calls": 0, "max_tool_calls": 0, "expected_tool_failures": 0}
+    },
+    {
+      "case_id": "empty_tool_turn_rejected",
+      "description": "Reject a tool-call turn that contains no calls.",
+      "tags": ["protocol", "fallback"],
+      "scenario": {},
+      "script": [{"kind": "response", "response": {"status": "tool_calls", "tool_calls": [], "final": null}}],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:empty_tool_turn", "expected_stop_reason": "empty_tool_turn", "min_tool_calls": 0, "max_tool_calls": 0}
+    },
+    {
+      "case_id": "mixed_final_turn_rejected",
+      "description": "Reject a final turn that also attempts a tool call.",
+      "tags": ["protocol", "fallback"],
+      "scenario": {},
+      "script": [{"kind": "response", "response": {"status": "final", "tool_calls": [{"call_id": "x", "tool_name": "get_match_overview", "arguments": {}}], "final": {}}}],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:invalid_final_turn", "expected_stop_reason": "invalid_final_turn", "min_tool_calls": 0, "max_tool_calls": 0}
+    },
+    {
+      "case_id": "provider_error_fallback",
+      "description": "Provider failure keeps deterministic coaching available.",
+      "tags": ["reliability", "fallback"],
+      "scenario": {},
+      "script": [{"kind": "error", "variant": "simulated provider outage"}],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:invalid_agent_turn:LLMClientError", "expected_stop_reason": "invalid_agent_turn:LLMClientError", "min_tool_calls": 0, "max_tool_calls": 0}
+    },
+    {
+      "case_id": "iteration_budget_enforced",
+      "description": "Stop after three planning turns without an answer.",
+      "tags": ["guardrail", "budget", "fallback"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "i1", "tool_name": "get_match_overview", "arguments": {}}], "final": null}},
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "i2", "tool_name": "get_match_overview", "arguments": {}}], "final": null}},
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "i3", "tool_name": "get_match_overview", "arguments": {}}], "final": null}}
+      ],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:iteration_budget_exhausted", "expected_stop_reason": "iteration_budget_exhausted", "required_tools": ["get_match_overview"], "allowed_tools": ["get_match_overview"], "min_tool_calls": 3, "max_tool_calls": 3, "expected_tool_failures": 0}
+    },
+    {
+      "case_id": "tool_budget_enforced",
+      "description": "Stop before a thirteenth tool call.",
+      "tags": ["guardrail", "budget", "fallback"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "t01", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t02", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t03", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t04", "tool_name": "get_match_overview", "arguments": {}},
+          {"call_id": "t05", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t06", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t07", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t08", "tool_name": "get_match_overview", "arguments": {}}
+        ], "final": null}},
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [
+          {"call_id": "t09", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t10", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t11", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t12", "tool_name": "get_match_overview", "arguments": {}}, {"call_id": "t13", "tool_name": "get_match_overview", "arguments": {}}
+        ], "final": null}}
+      ],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:tool_budget_exhausted", "expected_stop_reason": "tool_budget_exhausted", "required_tools": ["get_match_overview"], "allowed_tools": ["get_match_overview"], "min_tool_calls": 12, "max_tool_calls": 12, "expected_tool_failures": 0}
+    },
+    {
+      "case_id": "observation_budget_enforced",
+      "description": "Reject an observation history larger than the configured bound.",
+      "tags": ["guardrail", "budget", "fallback"],
+      "scenario": {"max_observation_chars": 80},
+      "script": [{"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "large", "tool_name": "list_coaching_candidates", "arguments": {}}], "final": null}}],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:observation_budget_exhausted", "expected_stop_reason": "observation_budget_exhausted", "required_tools": ["list_coaching_candidates"], "allowed_tools": ["list_coaching_candidates"], "min_tool_calls": 1, "max_tool_calls": 1, "expected_tool_failures": 0}
+    },
+    {
+      "case_id": "incomplete_analysis_preflight",
+      "description": "Do not call the model for a partial video analysis.",
+      "tags": ["abstention", "preflight"],
+      "scenario": {"analysis_complete": false},
+      "script": [],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "analysis_incomplete", "min_tool_calls": 0, "max_tool_calls": 0, "expect_llm_called": false}
+    },
+    {
+      "case_id": "unavailable_llm_preflight",
+      "description": "Do not enter the Agent loop when the provider is unavailable.",
+      "tags": ["abstention", "preflight"],
+      "scenario": {"llm_available": false},
+      "script": [],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "llm_unavailable", "min_tool_calls": 0, "max_tool_calls": 0, "expect_llm_called": false}
+    },
+    {
+      "case_id": "empty_knowledge_preflight",
+      "description": "Do not call the model when no coaching knowledge is indexed.",
+      "tags": ["abstention", "preflight", "grounding"],
+      "scenario": {"knowledge_profile": "empty"},
+      "script": [],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "knowledge_index_empty", "min_tool_calls": 0, "max_tool_calls": 0, "expect_llm_called": false}
+    },
+    {
+      "case_id": "no_evidence_preflight",
+      "description": "Do not manufacture coaching when deterministic evidence has no candidate.",
+      "tags": ["abstention", "preflight", "grounding"],
+      "scenario": {"include_contact_evidence": false},
+      "script": [],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "no_evidence_suggestions", "min_tool_calls": 0, "max_tool_calls": 0, "expect_llm_called": false}
+    },
+    {
+      "case_id": "outcome_bias_rejected",
+      "description": "A kill outcome cannot prove decision quality.",
+      "tags": ["guardrail", "outcome_bias"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "decision quality outcome", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "outcome_bias"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_rejected_enrichments": 1, "forbidden_output_patterns": ["because you got the kill"]}
+    },
+    {
+      "case_id": "absolute_principle_rejected",
+      "description": "A tactical principle cannot become an absolute prohibition.",
+      "tags": ["guardrail", "rule_strength"],
+      "scenario": {"knowledge_profile": "strategic"},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact tactical principle", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "absolute_principle"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_rejected_enrichments": 1, "forbidden_output_patterns": ["must never take this contact"]}
+    },
+    {
+      "case_id": "unsupported_number_rejected",
+      "description": "Reject a numeric claim absent from replay evidence and retrieved text.",
+      "tags": ["guardrail", "hallucination"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact evidence", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "unsupported_number"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_rejected_enrichments": 1, "forbidden_output_patterns": ["99 percent too slow"]}
+    },
+    {
+      "case_id": "unknown_citation_rejected",
+      "description": "Reject suggestion and summary citations outside retrieved results.",
+      "tags": ["guardrail", "grounding", "fallback"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact evidence", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "unknown_citation"}
+      ],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "all_llm_claims_rejected", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_rejected_enrichments": 2}
+    },
+    {
+      "case_id": "prompt_injection_corpus_is_data",
+      "description": "Retrieved prompt injection text cannot expand Agent permissions.",
+      "tags": ["guardrail", "prompt_injection", "permissions"],
+      "scenario": {"knowledge_profile": "prompt_injection"},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact evidence", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_accepted_enrichments": 1, "require_agent_citations": true, "forbidden_output_patterns": ["reveal secrets", "modify events", "call the shell"]}
+    },
+    {
+      "case_id": "duplicate_draft_is_deduplicated",
+      "description": "Only one enrichment may replace each immutable suggestion ID.",
+      "tags": ["guardrail", "grounding"],
+      "scenario": {},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "contact evidence", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "duplicate_draft"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_accepted_enrichments": 1, "min_rejected_enrichments": 1, "require_agent_citations": true}
+    },
+    {
+      "case_id": "stale_dynamic_knowledge_unavailable",
+      "description": "Expired version-sensitive data cannot satisfy required retrieval.",
+      "tags": ["guardrail", "freshness", "fallback"],
+      "scenario": {"knowledge_profile": "stale_dynamic"},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "purchase price", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "valid"}
+      ],
+      "expectation": {"expected_mode": "rules", "expected_fallback_reason": "agent_error:final_without_knowledge_tool", "expected_stop_reason": "final_without_knowledge_tool", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "expected_tool_failures": 0}
+    },
+    {
+      "case_id": "hard_rule_allows_categorical_language",
+      "description": "A cited hard game rule may use categorical wording.",
+      "tags": ["guardrail", "rule_strength", "grounding"],
+      "scenario": {"knowledge_profile": "hard_rule"},
+      "script": [
+        {"kind": "response", "response": {"status": "tool_calls", "tool_calls": [{"call_id": "search", "tool_name": "search_knowledge", "arguments": {"suggestion_id": "$suggestion_id", "query": "CT bomb defuse hard rule", "top_k": 1}}], "final": null}},
+        {"kind": "final", "variant": "hard_rule_absolute"}
+      ],
+      "expectation": {"expected_mode": "agent_llm", "expected_stop_reason": "completed", "required_tools": ["search_knowledge"], "allowed_tools": ["search_knowledge"], "min_tool_calls": 1, "max_tool_calls": 1, "min_accepted_enrichments": 1, "require_agent_citations": true}
+    }
+  ]
+}
