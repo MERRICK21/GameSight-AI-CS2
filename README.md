@@ -98,6 +98,40 @@ twelve tool calls; a final answer without suggestion-bound knowledge retrieval i
 rejected. Agent iterations, tool calls, failures, tool names and stop reason are
 visible in the bilingual diagnostics panel.
 
+## Offline Agent evaluation
+
+The versioned benchmark at `evaluation/agent_offline_v1.json` runs 26 synthetic
+replay scenarios through the real Agent loop, tool registry, retriever and final
+coaching validators without calling DeepSeek, Ollama or a judge LLM. It covers
+normal completion, tool choice and argument recovery, protocol and budget limits,
+preflight abstention, citation grounding, stale dynamic facts, outcome bias,
+unsupported numbers, rule strength and prompt-injection boundaries.
+
+```powershell
+gamesight-agent-eval evaluation/agent_offline_v1.json
+gamesight-agent-eval evaluation/agent_offline_v1.json --json
+```
+
+The evaluator reports case pass rate, task completion, fallback accuracy, tool
+precision/recall, argument validity, tool execution success, citation coverage,
+guardrail pass rate, latency and token usage. Pytest executes the same suite in
+CI, and the CLI returns a non-zero exit code below the configured minimum pass
+rate. See `evaluation/README.md` for the data contract and extension guidance.
+
+Real-provider evaluation is a separate, explicit-cost path. The seven-case
+provider suite lets DeepSeek or Ollama choose its own tools, repeats each case to
+measure planning stability, and stores only aggregate metrics and privacy-safe
+traces. It is never executed by CI:
+
+```powershell
+gamesight-agent-provider-eval evaluation/agent_provider_v1.json `
+  --provider deepseek --repetitions 3 --allow-provider-calls
+```
+
+Current input/output prices must be supplied with the pricing flags if a cost
+estimate is required; rates are deliberately not hard-coded. See
+`evaluation/README.md` for the complete command and report fields.
+
 See [Project Journey](docs/PROJECT_JOURNEY.md) or the
 [Chinese project journey](docs/PROJECT_JOURNEY_ZH.md) for the complete engineering
 and interview narrative from Sprint planning and computer vision through RAG/LLM

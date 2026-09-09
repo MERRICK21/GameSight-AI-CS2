@@ -184,7 +184,7 @@ CS2 POV recording
   diagnostics; avoided unnecessary multi-Agent/framework complexity.
 - Added decision-quality evaluation that rejects hindsight reasoning such as
   treating a kill or round win as proof that an action was strategically correct.
-- Maintained a 534-test regression suite covering perception, match-level K/D,
+- Maintained a 543-test regression suite covering perception, match-level K/D,
   RAG retrieval, LLM validation, Agent permissions, tool traces and fallback paths.
 
 ## Interview narrative
@@ -216,7 +216,16 @@ state and reliability problem—not just a prompt-engineering problem.”
 - It operates on already-extracted evidence and does not autonomously inspect raw video.
 - Alive counts, bomb state, kit and detailed economy remain unavailable unless the
   perception layer or user supplies reliable evidence.
-- The next meaningful step is an offline Agent evaluation set covering tool choice,
-  argument correctness, citation grounding, abstention and end-to-end coaching quality.
+- A versioned 26-case offline Agent evaluation set now covers tool choice,
+  argument correctness, citation grounding, abstention, budget enforcement and
+  end-to-end coaching validation without a judge LLM or network dependency.
+- The next evaluation step is an opt-in DeepSeek run over the same contracts to
+  measure planning variance, latency, token use and estimated cost separately
+  from deterministic CI correctness.
+- That provider benchmark is now implemented as a separate seven-case suite. It
+  repeats real DeepSeek/Ollama runs, scores tool-path and outcome stability, and
+  records p50/p95 latency, token usage and caller-supplied current pricing without
+  retaining prompts or generated prose. The first real DeepSeek baseline remains
+  pending until an API key is explicitly configured.
 - Multi-Agent separation should be considered only if independent evidence,
   retrieval and critic roles produce measurable quality gains over this baseline.

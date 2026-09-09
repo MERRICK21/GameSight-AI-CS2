@@ -6,6 +6,36 @@
 
 ---
 
+## Latest Improvements (2026-09-01)
+
+### Versioned single-Agent offline evaluation
+- **26-case offline benchmark added**: `evaluation/agent_offline_v1.json` exercises the production `ReplayCoachAgent`, read-only registry, RAG retriever and final claim validators with deterministic scripted model turns and no network dependency.
+- **Six evaluation families covered**: normal full/minimal tool completion; tool selection and recoverable argument/lookup failures; typed protocol rejection; iteration/tool/observation budgets; incomplete-analysis/provider/knowledge/evidence preflight; and grounding/safety controls.
+- **Objective scoring without a judge LLM**: every case declares required/allowed tools, call bounds, expected failures, expected mode/stop/fallback, accepted/rejected enrichment thresholds, citation requirements and forbidden output patterns.
+- **Provider-neutral metrics implemented**: the evaluator reports case pass rate, task completion, fallback accuracy, tool-selection precision/recall, argument validity, execution success, citation coverage, guardrail pass rate, latency and token totals.
+- **Grounding and policy regressions included**: direct final-without-retrieval, unknown suggestion/citation, stale dynamic data, unsupported numbers, outcome-based hindsight, over-absolute tactical principles and malicious retrieved instructions all have explicit expected behavior.
+- **Safety and resilience budgets verified**: duplicate call IDs cannot satisfy the knowledge requirement; unlisted tools fail typed validation; the loop stops deterministically at three iterations, twelve tool calls or the observation-size limit.
+- **CLI and CI integration**: `gamesight-agent-eval evaluation/agent_offline_v1.json` emits Markdown by default, supports JSON/report output and exits non-zero below a configurable pass-rate threshold. Pytest runs the same versioned suite on every push and pull request.
+- **Current baseline**: **26/26 cases pass**. Task completion, fallback accuracy, tool precision/recall, citation coverage and guardrail pass rate are 100%. Argument validity is 97.2% and tool execution success is 88.9% because failure-recovery cases deliberately issue invalid arguments, unknown lookups and duplicate calls.
+- **Interpretation boundary**: this suite measures deterministic Agent contracts and safety behavior, not DeepSeek's real-world planning quality. The next evaluation layer should replay the same contracts against an opt-in real DeepSeek endpoint and separately record model variance, latency, tokens and estimated cost.
+
+### Opt-in DeepSeek/Ollama provider benchmark
+- **Real model planning path implemented**: `evaluation/agent_provider_v1.json` contains seven model-applicable contracts. Four require the provider to inspect immutable candidates, round evidence, decision context and suggestion-bound knowledge; three verify preflight paths make zero provider calls.
+- **Repeated-run stability metrics**: the provider runner measures per-case pass consistency, dominant tool-path stability and complete outcome-signature stability across 1-20 sequential repetitions, alongside the original contract metrics.
+- **Operational telemetry**: reports include provider/model, trial and call counts, successful Agent rate, p50/p95 latency, prompt/completion/total tokens and optional estimated USD cost.
+- **Version-sensitive pricing**: no API price is embedded in code. Current input/output rates, source and verification date are explicit CLI inputs or environment configuration, matching the project's dynamic-data policy.
+- **Privacy and spend controls**: `--allow-provider-calls` is mandatory; the default is one repetition; CI never invokes the provider suite. Reports omit system/user prompts, retrieved passage text, generated coaching prose, secrets and private evidence paths.
+- **Provider-neutral execution**: DeepSeek remains the hosted default and Ollama uses the same benchmark interface. `gamesight-agent-provider-eval` supports model, timeout, repetitions, pass threshold, JSON and output-file controls.
+- **Validation status**: the complete repeated-run path is tested with an autonomous provider double that chooses tools from live prompts rather than replaying scripted turns. A real DeepSeek baseline is correctly still unreported because `DEEPSEEK_API_KEY` is not configured in the current process.
+
+### Resume / interview talking points
+- Converted an Agent feature into a **measurable system** by defining a versioned scenario contract rather than relying on hand-picked demos or subjective output review.
+- Separated **task success, tool behavior, grounding and guardrails** into independent metrics so a fluent final answer cannot hide incorrect tool use or unsafe fallback behavior.
+- Used deterministic model doubles for CI reproducibility while preserving the full production execution path; real-provider benchmarking remains opt-in to avoid unstable and costly CI.
+- Treated negative cases as first-class data: intentionally failing tool calls lower raw execution-success metrics while raising confidence that recovery, abstention and permission boundaries work correctly.
+
+---
+
 ## Latest Improvements (2026-08-27)
 
 ### Single-Agent + evidence-constrained RAG/LLM coach
@@ -30,7 +60,7 @@
 - **Reproducible tooling and evaluation**: `gamesight-knowledge` builds/queries the index from the CLI; a provider-neutral evaluator reports retrieval Recall@K and MRR; fake LLM/embedding tests cover grounding and fallback without network calls.
 - **Environment validation**: the new Python dependencies import successfully and a real local Chroma round trip passes. The first MiniLM artifact download is still pending because the current execution environment returned empty Hugging Face cache files after TLS interception; Windows trust-store support and an isolated `models/huggingface/` cache are in place so the project does not rely on disabling certificate checks or deleting the user's global cache.
 - **Local CS2 manual integrated**: the 20,050-character `cs2_basic_rule.docx` manual is detected automatically when present and indexed together with the repository evidence policy. The third-party/source document and Word lock files remain Git-ignored, while Markdown/text/DOCX uploads can extend the same local index.
-- **Regression status**: compilation and the complete suite pass with **534 tests**. Agent regressions additionally cover valid multi-turn tool use, no-tool final rejection, the fixed permission allowlist, private asset-path redaction, invalid argument handling, untrusted-tool-output prompting and post-Agent outcome-bias rejection.
+- **Regression status**: compilation and the complete suite pass with **543 tests**. Agent regressions additionally cover valid multi-turn tool use, no-tool final rejection, the fixed permission allowlist, private asset-path redaction, invalid argument handling, untrusted-tool-output prompting, post-Agent outcome-bias rejection and repeated provider-evaluation telemetry.
 
 ### Resume / interview talking points
 - Designed a production-style **two-step RAG pipeline** that separates deterministic CV/event evidence from probabilistic LLM language generation.
@@ -307,7 +337,7 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 
 ## Test Summary
 
-**534 passing**, 0 failures.
+**543 passing**, 0 failures.
 
 | Module | Tests |
 |--------|-------|
@@ -321,6 +351,8 @@ EvidenceClipExtractor -> EvidenceClip[] (H.264, event -2s to +3s)
 | Streamlit Demo | 27 |
 | Internationalization | 10 |
 | AI Coach | 12 |
+| Offline Agent Evaluation | 5 |
+| Provider Agent Evaluation | 4 |
 | Evidence Screenshots | 11 |
 | Match-level Regression | 4 |
 

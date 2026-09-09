@@ -10,6 +10,8 @@ requires-python = ">=3.11"
 
 [project.scripts]
 gamesight-knowledge = "gamesight.knowledge.cli:main"
+gamesight-agent-eval = "gamesight.evaluation.agent_cli:main"
+gamesight-agent-provider-eval = "gamesight.evaluation.agent_provider_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
